@@ -112,3 +112,6 @@ __all__ = [
     "VideoGeneratorBackend",
 ]
 
+from k2core.backends.comfy_krea import ComfyKreaBackend  # noqa: E402
+
+__all__ += ["ComfyKreaBackend"]

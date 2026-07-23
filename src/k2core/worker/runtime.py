@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from k2core import __version__ as k2core_version
 from k2core.config import ModelDirectories
 from k2core.image_edit import (
     composite_regional_edit,
@@ -238,6 +239,7 @@ def native_scaled_fp8_supported(
 
 def probe_runtime(comfyui_root: Path) -> dict[str, Any]:
     payload: dict[str, Any] = {
+        "k2core_version": k2core_version,
         "python": sys.version,
         "python_executable": sys.executable,
         "platform": platform.platform(),
@@ -2603,4 +2605,3 @@ class ComfyBaselineRuntime:
             summary["cross_modal_partition"] = "subject_text_private_to_box"
             summary["image_to_image_attention"] = "unmodified"
         return summary
-

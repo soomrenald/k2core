@@ -1,14 +1,23 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
+from k2core import __version__
 from k2core.worker.runtime import (
     accelerator_backend,
     native_scaled_fp8_supported,
+    probe_runtime,
 )
 
 
 class AcceleratorCapabilityTests(unittest.TestCase):
+    def test_runtime_probe_reports_core_version(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            payload = probe_runtime(Path(directory))
+        self.assertEqual(payload["k2core_version"], __version__)
+
     def test_backend_distinguishes_rocm_cuda_and_cpu_builds(self) -> None:
         self.assertEqual(accelerator_backend("7.1", None), "rocm")
         self.assertEqual(accelerator_backend(None, "12.8"), "cuda")
@@ -36,4 +45,3 @@ class AcceleratorCapabilityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

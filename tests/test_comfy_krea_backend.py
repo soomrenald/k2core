@@ -3,8 +3,13 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+from PIL import Image
 
 from k2core.backends import ComfyKreaBackend
+from k2core.face_detail import DetectedFace
+from k2core.regions import PixelBox
 
 
 class Token:
@@ -20,6 +25,8 @@ class Runtime:
 
     def __init__(self, output: Path) -> None:
         self.output = output
+        self.comfyui_root = output.parent
+        self.face_detector_path = output.parent / "face-det.onnx"
         self.generate_request = None
         self.edit_request = None
         self.face_request = None
@@ -40,6 +47,42 @@ class Runtime:
 
 
 class ComfyKreaBackendTests(unittest.TestCase):
+    def test_face_detection_returns_typed_candidates_without_refining(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            output = root / "output.png"
+            Image.new("RGB", (64, 64), "white").save(source)
+            output.touch()
+            runtime = Runtime(output)
+            runtime.face_detector_path.touch()
+            backend = ComfyKreaBackend(
+                runtime,
+                asset_resolver=lambda asset_id: root / asset_id,
+                output_directory=root / "results",
+            )
+            detected = (DetectedFace(PixelBox(4, 5, 30, 40), 0.87),)
+            with patch("k2core.backends.comfy_krea.OnnxNanoFaceDetector") as detector:
+                detector.return_value.detect.return_value = detected
+                detector.return_value.execution_provider = "CPUExecutionProvider"
+                result = backend.detect_faces(
+                    {
+                        "source_asset_id": "source.png",
+                        "threshold": 0.35,
+                        "provider": "cpu",
+                    },
+                    progress=lambda *_item: None,
+                    cancellation=Token(),
+                )
+
+        self.assertEqual(result.faces, detected)
+        self.assertEqual(result.metadata["provider"], "CPUExecutionProvider")
+        detector.assert_called_once_with(
+            runtime.face_detector_path.resolve(),
+            threshold=0.35,
+            provider="cpu",
+        )
+
     def test_generate_maps_regions_and_resolves_adapter_assets(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

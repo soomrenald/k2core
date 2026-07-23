@@ -48,6 +48,9 @@ class PublicContractTests(unittest.TestCase):
             def edit_frame(self, request, *, progress, cancellation):
                 raise NotImplementedError
 
+            def detect_faces(self, request, *, progress, cancellation):
+                raise NotImplementedError
+
             def refine_faces(self, request, *, progress, cancellation):
                 raise NotImplementedError
 
@@ -75,9 +78,9 @@ class PublicContractTests(unittest.TestCase):
     def test_worker_protocol_is_explicit_and_keeps_existing_commands(self) -> None:
         self.assertEqual(WORKER_PROTOCOL_VERSION, "1")
         self.assertEqual(CommandKind.EDIT_IMAGE.value, "edit_image")
+        self.assertEqual(CommandKind.DETECT_FACES.value, "detect_faces")
         self.assertEqual(CommandKind.REFINE_FACES.value, "refine_faces")
 
 
 if __name__ == "__main__":
     unittest.main()
-

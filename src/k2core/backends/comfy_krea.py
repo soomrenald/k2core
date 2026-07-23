@@ -6,12 +6,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from PIL import Image
+
 from k2core.backends import (
     BackendCapabilities,
     BackendResult,
     CancellationToken,
+    FaceDetectionResult,
     ProgressCallback,
 )
+from k2core.face_detail import OnnxNanoFaceDetector, discover_face_detector
 from k2core.regions import PixelBox, RegionDefinition
 
 
@@ -37,6 +41,7 @@ class ComfyKreaBackend:
                     "edit_image",
                     "regional_image",
                     "regional_edit",
+                    "face_detection",
                     "face_refinement",
                 }
             ),
@@ -173,6 +178,49 @@ class ComfyKreaBackend:
         )
         cancellation.raise_if_cancelled()
         return _result(result)
+
+    def detect_faces(
+        self,
+        request: Mapping[str, Any],
+        *,
+        progress: ProgressCallback,
+        cancellation: CancellationToken,
+    ) -> FaceDetectionResult:
+        source_asset_id = str(request.get("source_asset_id", ""))
+        if not source_asset_id:
+            raise ValueError("face detection requires source_asset_id")
+        threshold = float(request.get("threshold", 0.4))
+        if not 0.0 < threshold < 1.0:
+            raise ValueError("face detector threshold must be in (0, 1)")
+        provider = str(request.get("provider", "auto"))
+        cancellation.raise_if_cancelled()
+        configured_path = getattr(self.runtime, "face_detector_path", None)
+        detector_path = (
+            Path(configured_path).expanduser().resolve()
+            if configured_path is not None
+            else discover_face_detector(Path(self.runtime.comfyui_root))
+        )
+        if detector_path is None or not detector_path.is_file():
+            raise RuntimeError(
+                "face detector model was not found under the configured ComfyUI root"
+            )
+        progress("face_detection", None, {"message": "Detecting candidate faces"})
+        detector = OnnxNanoFaceDetector(
+            detector_path,
+            threshold=threshold,
+            provider=provider,
+        )
+        with Image.open(self.asset_resolver(source_asset_id)) as image:
+            faces = detector.detect(image)
+        cancellation.raise_if_cancelled()
+        return FaceDetectionResult(
+            faces=faces,
+            metadata={
+                "detector_path": str(detector_path),
+                "provider": detector.execution_provider or provider,
+                "threshold": threshold,
+            },
+        )
 
     def release(self) -> None:
         if self.release_callback is not None:

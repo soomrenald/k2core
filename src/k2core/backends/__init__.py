@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, runtime_checkable
 
+from k2core.face_detail import DetectedFace
+
 
 ProgressCallback = Callable[[str, float | None, Mapping[str, Any]], None]
 
@@ -32,6 +34,12 @@ class BackendResult:
     asset_paths: tuple[Path, ...]
     metadata: Mapping[str, Any] = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class FaceDetectionResult:
+    faces: tuple[DetectedFace, ...]
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 @runtime_checkable
@@ -71,6 +79,14 @@ class FrameEditorBackend(Protocol):
         cancellation: CancellationToken,
     ) -> BackendResult: ...
 
+    def detect_faces(
+        self,
+        request: Mapping[str, Any],
+        *,
+        progress: ProgressCallback,
+        cancellation: CancellationToken,
+    ) -> FaceDetectionResult: ...
+
     def refine_faces(
         self,
         request: Mapping[str, Any],
@@ -106,6 +122,7 @@ __all__ = [
     "BackendCapabilities",
     "BackendResult",
     "CancellationToken",
+    "FaceDetectionResult",
     "FrameEditorBackend",
     "ImageGeneratorBackend",
     "ProgressCallback",

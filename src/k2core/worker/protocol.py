@@ -15,6 +15,7 @@ class CommandKind(StrEnum):
     INITIALIZE_RUN = "initialize_run"
     GENERATE_BASELINE = "generate_baseline"
     EDIT_IMAGE = "edit_image"
+    DETECT_FACES = "detect_faces"
     REFINE_FACES = "refine_faces"
     NEXT_BLOCK = "next_block"
     NEXT_STEP = "next_step"
@@ -50,4 +51,3 @@ class WorkerEvent:
     state: WorkerState
     message: str
     payload: dict[str, Any] = field(default_factory=dict)
-

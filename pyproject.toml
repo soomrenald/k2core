@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "k2core"
+version = "0.1.0"
+description = "Shared K2 image, regional, adapter, worker, memory, asset, and runtime core"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.9",
+]
+
+[project.urls]
+Repository = "https://github.com/soomrenald/k2core"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/k2core"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+

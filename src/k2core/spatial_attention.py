@@ -6,11 +6,11 @@ from k2core.regional_prompting import BoundRegionalPromptPlan
 
 
 def text_region_ownership(plan: BoundRegionalPromptPlan) -> tuple[int, ...]:
-    """Return zero for shared text and a distinct owner for each subject clause."""
+    """Return zero for shared text and a distinct owner for each local clause."""
     owners = [0] * plan.text_token_count
     owner = 0
     for span in plan.spans:
-        if span.spatial_role != "subject":
+        if span.spatial_role not in {"subject", "edit"}:
             continue
         owner += 1
         owners[span.start : span.end] = [owner] * (span.end - span.start)
@@ -18,11 +18,11 @@ def text_region_ownership(plan: BoundRegionalPromptPlan) -> tuple[int, ...]:
 
 
 def image_region_ownership(plan: BoundRegionalPromptPlan) -> tuple[int, ...]:
-    """Assign each subject-box image token to the first/highest-priority subject."""
+    """Assign each local-box image token to its first/highest-priority owner."""
     owners = [0] * plan.image_token_count
     owner = 0
     for span in plan.spans:
-        if span.spatial_role != "subject":
+        if span.spatial_role not in {"subject", "edit"}:
             continue
         owner += 1
         for index, weight in enumerate(span.image_token_mask):
@@ -67,6 +67,7 @@ class KreaSpatialAttentionOverride:
         query_chunk_size: int = 256,
         lora_delta_adaptation: bool = False,
         lora_delta_adaptation_gain: float = 0.35,
+        lora_statistics: Any | None = None,
     ) -> None:
         self.plan = plan
         self.outside_penalty_ratio = outside_penalty_ratio
@@ -77,6 +78,7 @@ class KreaSpatialAttentionOverride:
         self.query_chunk_size = query_chunk_size
         self.lora_delta_adaptation = lora_delta_adaptation
         self.lora_delta_adaptation_gain = lora_delta_adaptation_gain
+        self.lora_statistics = lora_statistics
         self.expected_sequence_length = (
             plan.text_token_count + plan.image_token_count
         )
@@ -143,15 +145,20 @@ class KreaSpatialAttentionOverride:
             device=v.device,
         )
         key_transposed = k.transpose(-2, -1)
-        pair_fields, emphasis_fields, text_owners, image_owners = self._pair_fields(q)
+        pair_fields, emphasis_fields, text_owners, combined_owners = self._pair_fields(q)
         for start in range(0, q.shape[-2], self.query_chunk_size):
             end = min(q.shape[-2], start + self.query_chunk_size)
             scores = torch.matmul(q[:, :, start:end], key_transposed) * scale
             scores = scores.float()
             if main_stream:
-                self._partition_regional_stream(
-                    scores, start, end, text_owners, image_owners
-                )
+                self._partition_regional_stream(scores, start, end, combined_owners)
+                if self.lora_statistics is not None:
+                    self.lora_statistics.apply_asymmetric_attention(
+                        scores,
+                        start=start,
+                        end=end,
+                        text_token_count=self.plan.text_token_count,
+                    )
                 self._add_spatial_bias(scores, start, end, pair_fields, emphasis_fields)
             else:
                 self._partition_regional_text(scores, start, end, text_owners)
@@ -198,10 +205,12 @@ class KreaSpatialAttentionOverride:
         text_owners = torch.tensor(
             self.text_owners, dtype=torch.int16, device=device
         )
-        image_owners = torch.tensor(
-            self.image_owners, dtype=torch.int16, device=device
+        combined_owners = torch.tensor(
+            self.text_owners + self.image_owners,
+            dtype=torch.int16,
+            device=device,
         )
-        cached = fields, emphasis_fields, text_owners, image_owners
+        cached = fields, emphasis_fields, text_owners, combined_owners
         self._cache[key] = cached
         return cached
 
@@ -209,47 +218,9 @@ class KreaSpatialAttentionOverride:
         """Keep subject-owned keys private to that subject in both text stages."""
         self._partition_owned_keys(scores, start, end, text_owners)
 
-    def _partition_regional_stream(
-        self, scores, start, end, text_owners, image_owners
-    ) -> None:
-        """Partition cross-modal subject attention without masking image-to-image."""
-        text_count = self.plan.text_token_count
-        text_end = min(end, text_count)
-        if start < text_end:
-            query_text_owners = text_owners[start:text_end]
-            blocked_text = (text_owners.reshape(1, -1) > 0) & (
-                query_text_owners.reshape(-1, 1) != text_owners.reshape(1, -1)
-            )
-            scores[
-                :, :, : text_end - start, :text_count
-            ].masked_fill_(
-                blocked_text.reshape(1, 1, text_end - start, -1),
-                float("-inf"),
-            )
-            blocked_images = (image_owners.reshape(1, -1) > 0) & (
-                query_text_owners.reshape(-1, 1) != image_owners.reshape(1, -1)
-            )
-            scores[
-                :, :, : text_end - start, text_count:
-            ].masked_fill_(
-                blocked_images.reshape(1, 1, text_end - start, -1),
-                float("-inf"),
-            )
-
-        image_start = max(start, text_count)
-        if image_start < end:
-            query_image_owners = image_owners[
-                image_start - text_count : end - text_count
-            ]
-            blocked_text = (text_owners.reshape(1, -1) > 0) & (
-                query_image_owners.reshape(-1, 1) != text_owners.reshape(1, -1)
-            )
-            scores[
-                :, :, image_start - start : end - start, :text_count
-            ].masked_fill_(
-                blocked_text.reshape(1, 1, end - image_start, -1),
-                float("-inf"),
-            )
+    def _partition_regional_stream(self, scores, start, end, combined_owners) -> None:
+        """Prevent regional text/image keys from carrying deltas to other owners."""
+        self._partition_owned_keys(scores, start, end, combined_owners)
 
     @staticmethod
     def _partition_owned_keys(scores, start, end, owners) -> None:
@@ -335,10 +306,14 @@ class KreaSpatialAttentionOverride:
             "text_refiner_attention_calls": self.text_refiner_calls,
             "text_partition": "subject_keys_private_to_region",
             "subject_box_exclusion": True,
-            "cross_modal_partition": "subject_text_private_to_box",
-            "image_to_image_attention": "unmodified",
+            "cross_modal_partition": "regional_keys_private_to_owner",
+            "image_to_image_attention": "asymmetric_owner_partition",
+            "lora_influence_attention": (
+                "asymmetric_modified_token_partition"
+                if self.lora_statistics is not None
+                else "inactive"
+            ),
             "lora_delta_adaptation": self.lora_delta_adaptation,
             "lora_delta_adaptation_gain": self.lora_delta_adaptation_gain,
             "final_region_scales": dict(self.region_scales),
         }
-

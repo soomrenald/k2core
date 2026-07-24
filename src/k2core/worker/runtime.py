@@ -83,7 +83,11 @@ class CriticalGpuMemoryPressure(RuntimeError):
 
 
 class LoraDeltaStatistics:
-    """Accumulate routed per-token delta magnitudes without synchronizing each layer."""
+    """Track routed LoRA deltas and the image tokens they materially modify."""
+
+    MODIFIED_THRESHOLD = 0.05
+    ATTENTION_ISOLATION_STRENGTH = 5.0
+    CROSS_LORA_STRENGTH = 3.0
 
     def __init__(self, routes: tuple[LoraDeltaRoute, ...]) -> None:
         self.routes = {route.lora_id: route for route in routes}
@@ -98,6 +102,7 @@ class LoraDeltaStatistics:
                 "step_image_energy": None,
                 "step_image_count": 0,
                 "delta_reference": None,
+                "modified_image_flags": None,
                 "calls": 0,
             }
             for route in routes
@@ -107,7 +112,14 @@ class LoraDeltaStatistics:
     def _add(previous, value):
         return value if previous is None else previous + value
 
-    def observe(self, route: LoraDeltaRoute, token_norms, *, route_kind: str) -> None:
+    def observe(
+        self,
+        route: LoraDeltaRoute,
+        token_norms,
+        *,
+        route_kind: str,
+        reference_norms=None,
+    ) -> None:
         state = self.values[route.lora_id]
         state["calls"] += 1
         batch = int(token_norms.shape[0])
@@ -126,11 +138,15 @@ class LoraDeltaStatistics:
             text_norms = token_norms
             image_norms = None
             text_observations = batch * enabled_text
+        elif int(token_norms.shape[-1]) == len(route.image_token_mask):
+            text_norms = None
+            image_norms = token_norms
+            text_observations = 0
         else:
             text_norms = token_norms[:, :text_count]
             image_norms = token_norms[:, text_count:]
             text_observations = batch * enabled_text
-        if enabled_text:
+        if enabled_text and text_norms is not None:
             text_energy = text_norms.square().sum()
             state["text_energy"] = self._add(state["text_energy"], text_energy)
             state["text_count"] += text_observations
@@ -147,6 +163,115 @@ class LoraDeltaStatistics:
                 state["step_image_energy"], image_energy
             )
             state["step_image_count"] += batch * enabled_image
+        if (
+            not route.global_scope
+            and reference_norms is not None
+            and route_kind == "combined"
+        ):
+            self._update_modified_image_flags(
+                route,
+                token_norms,
+                reference_norms,
+            )
+
+    def _update_modified_image_flags(
+        self,
+        route: LoraDeltaRoute,
+        token_norms,
+        reference_norms,
+    ) -> None:
+        import torch
+
+        text_count = len(route.text_token_mask)
+        image_count = len(route.image_token_mask)
+        sequence_length = int(token_norms.shape[-1])
+        if sequence_length == image_count:
+            image_norms = token_norms
+            image_reference = reference_norms
+        elif sequence_length == text_count + image_count:
+            image_norms = token_norms[..., text_count:]
+            image_reference = reference_norms[..., text_count:]
+        else:
+            return
+        if image_norms.ndim != 2 or image_reference.shape != image_norms.shape:
+            return
+        region_mask = torch.tensor(
+            route.image_token_mask,
+            device=image_norms.device,
+            dtype=torch.bool,
+        ).reshape(1, image_count)
+        modified = (
+            image_norms.float()
+            / image_reference.float().clamp_min(1.0e-6)
+            > self.MODIFIED_THRESHOLD
+        ) & region_mask
+        state = self.values[route.lora_id]
+        previous = state["modified_image_flags"]
+        if previous is None or previous.shape != modified.shape:
+            state["modified_image_flags"] = modified.detach()
+        else:
+            state["modified_image_flags"] = (
+                previous.to(device=modified.device) | modified
+            ).detach()
+
+    @staticmethod
+    def _fit_attention_batch(flags, batch: int):
+        if int(flags.shape[0]) == batch:
+            return flags
+        if int(flags.shape[0]) == 1:
+            return flags.repeat(batch, 1)
+        return flags[:1].repeat(batch, 1)
+
+    def apply_asymmetric_attention(
+        self,
+        scores,
+        *,
+        start: int,
+        end: int,
+        text_token_count: int,
+    ) -> None:
+        """Prevent outside image queries from reading LoRA-modified image keys."""
+
+        image_start = max(start, text_token_count)
+        if image_start >= end:
+            return
+        query_start = image_start - text_token_count
+        query_end = end - text_token_count
+        batch = int(scores.shape[0])
+        active_flags = []
+        for route in self.routes.values():
+            if route.global_scope:
+                continue
+            flags = self.values[route.lora_id]["modified_image_flags"]
+            if flags is None:
+                continue
+            flags = self._fit_attention_batch(
+                flags.to(device=scores.device, dtype=bool),
+                batch,
+            )
+            active_flags.append(flags)
+            query_flags = flags[:, query_start:query_end]
+            blocked = (~query_flags[:, :, None]) & flags[:, None, :]
+            scores[
+                :, :, image_start - start : end - start, text_token_count:
+            ].add_(
+                blocked[:, None].to(dtype=scores.dtype),
+                alpha=-self.ATTENTION_ISOLATION_STRENGTH,
+            )
+        if len(active_flags) < 2:
+            return
+        for left_index, left in enumerate(active_flags):
+            left_queries = left[:, query_start:query_end]
+            for right_index, right in enumerate(active_flags):
+                if left_index == right_index:
+                    continue
+                blocked = left_queries[:, :, None] & right[:, None, :]
+                scores[
+                    :, :, image_start - start : end - start, text_token_count:
+                ].add_(
+                    blocked[:, None].to(dtype=scores.dtype),
+                    alpha=-self.CROSS_LORA_STRENGTH,
+                )
 
     @staticmethod
     def _rms(energy, count: int) -> float:
@@ -161,6 +286,14 @@ class LoraDeltaStatistics:
             "text_delta_rms": self._rms(state["text_energy"], state["text_count"]),
             "image_delta_rms": self._rms(state["image_energy"], state["image_count"]),
             "outside_gate_delta_rms": 0.0,
+            "modified_image_tokens": (
+                int(state["modified_image_flags"].sum().item())
+                if state["modified_image_flags"] is not None
+                else 0
+            ),
+            "modified_threshold": self.MODIFIED_THRESHOLD,
+            "attention_isolation_strength": self.ATTENTION_ISOLATION_STRENGTH,
+            "cross_lora_strength": self.CROSS_LORA_STRENGTH,
         }
 
     def regional_attention_scales(self, gain: float) -> dict[str, float]:
@@ -972,7 +1105,15 @@ class ComfyBaselineRuntime:
                     token_norms = torch.linalg.vector_norm(
                         applied.detach(), dim=-1, dtype=torch.float32
                     )
-                    statistics.observe(route, token_norms, route_kind=self.route_kind)
+                    reference_norms = torch.linalg.vector_norm(
+                        base_out.detach(), dim=-1, dtype=torch.float32
+                    )
+                    statistics.observe(
+                        route,
+                        token_norms,
+                        route_kind=self.route_kind,
+                        reference_norms=reference_norms,
+                    )
                     total = total + applied
                 return total
 
@@ -1588,6 +1729,7 @@ class ComfyBaselineRuntime:
                 bound_regional_plan,
                 lora_delta_adaptation=regional_lora_delta_adaptation,
                 lora_delta_adaptation_gain=regional_lora_delta_adaptation_gain,
+                lora_statistics=lora_statistics,
             )
             if bound_regional_plan is not None
             and (bound_regional_plan.spans or bound_regional_plan.emphases)
@@ -1962,6 +2104,7 @@ class ComfyBaselineRuntime:
                 bound_plan,
                 lora_delta_adaptation=regional_lora_delta_adaptation,
                 lora_delta_adaptation_gain=regional_lora_delta_adaptation_gain,
+                lora_statistics=lora_statistics,
             )
             if bound_plan is not None and bound_plan.spans
             else None
@@ -2599,9 +2742,18 @@ class ComfyBaselineRuntime:
             summary["attention_query_chunk_size"] = (
                 attention_override.query_chunk_size
             )
-            summary["lora_delta_adaptation"] = attention_override.summary()
-            summary["text_partition"] = "subject_keys_private_to_region"
-            summary["subject_box_exclusion"] = True
-            summary["cross_modal_partition"] = "subject_text_private_to_box"
-            summary["image_to_image_attention"] = "unmodified"
+            attention_summary = attention_override.summary()
+            summary["lora_delta_adaptation"] = attention_summary
+            summary.update(
+                {
+                    key: attention_summary[key]
+                    for key in (
+                        "text_partition",
+                        "subject_box_exclusion",
+                        "cross_modal_partition",
+                        "image_to_image_attention",
+                        "lora_influence_attention",
+                    )
+                }
+            )
         return summary

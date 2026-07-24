@@ -13,7 +13,7 @@ from k2core.regional_lora import (
 )
 from k2core.regional_prompting import compile_regional_prompt_plan
 from k2core.regions import PixelBox, RegionDefinition
-from k2core.worker.runtime import ComfyBaselineRuntime
+from k2core.worker.runtime import ComfyBaselineRuntime, LoraDeltaStatistics
 
 
 class RegionalLoraRoutingTests(unittest.TestCase):
@@ -382,6 +382,118 @@ class RegionalLoraRoutingTests(unittest.TestCase):
             "unfused_region_text_image_delta_gate_v3",
         )
 
+    def test_production_bypass_zeroes_delta_outside_gate_and_tracks_inside(
+        self,
+    ) -> None:
+        try:
+            import torch
+        except ModuleNotFoundError:
+            self.skipTest("Torch is exercised in the configured ComfyUI worker environment")
+
+        comfy = ModuleType("comfy")
+        comfy.__path__ = []
+        weight_adapter = ModuleType("comfy.weight_adapter")
+
+        class FakeAdapterBase:
+            pass
+
+        class UnitDeltaAdapter(FakeAdapterBase):
+            weights = []
+
+            @staticmethod
+            def h(x, base_out):
+                del x
+                return torch.ones_like(base_out)
+
+        class FakeManager:
+            composite = None
+
+            def __init__(self):
+                self.adapters = []
+
+            def add_adapter(self, key, adapter, strength):
+                del key, strength
+                self.adapters.append(adapter)
+                type(self).composite = adapter
+
+            @staticmethod
+            def create_injections(model):
+                del model
+                return ["injection"]
+
+            def get_hook_count(self):
+                return len(self.adapters)
+
+        weight_adapter.WeightAdapterBase = FakeAdapterBase
+        weight_adapter.BypassInjectionManager = FakeManager
+        comfy.weight_adapter = weight_adapter
+
+        class FakePatcher:
+            model = object()
+
+            def clone(self):
+                return self
+
+            @staticmethod
+            def set_injections(name, injections):
+                del name, injections
+
+        plan, bound = self._plans()
+        route = compile_lora_delta_routes(
+            [
+                {
+                    "id": "right",
+                    "name": "Right",
+                    "global": False,
+                    "region_ids": ["right"],
+                }
+            ],
+            width=32,
+            height=16,
+            text_token_count=bound.text_token_count,
+            regional_plan=plan,
+            bound_plan=bound,
+        )[0]
+        statistics = LoraDeltaStatistics((route,))
+        with patch.dict(
+            sys.modules,
+            {
+                "comfy": comfy,
+                "comfy.weight_adapter": weight_adapter,
+            },
+        ):
+            _model, installed = ComfyBaselineRuntime._install_routed_lora_bypass(
+                FakePatcher(),
+                {
+                    "diffusion_model.blocks.0.attn.wo.weight": [
+                        (UnitDeltaAdapter(), route)
+                    ]
+                },
+                statistics,
+            )
+        composite = FakeManager.composite
+        self.assertEqual(installed, 1)
+        self.assertIsNotNone(composite)
+        for name in (
+            "is_conv",
+            "conv_dim",
+            "kernel_size",
+            "in_channels",
+            "out_channels",
+            "kw_dict",
+        ):
+            setattr(composite, name, None)
+        sequence_length = bound.text_token_count + len(route.image_token_mask)
+        base = torch.ones((1, sequence_length, 4))
+        applied = composite.h(torch.zeros_like(base), base)
+
+        self.assertTrue(torch.equal(applied[:, -2], torch.zeros_like(applied[:, -2])))
+        self.assertTrue(torch.equal(applied[:, -1], torch.ones_like(applied[:, -1])))
+        self.assertEqual(
+            statistics.values["right"]["modified_image_flags"].tolist(),
+            [[False, True]],
+        )
+
     def test_runtime_rejects_a_regional_lora_with_no_routable_targets(self) -> None:
         plan, bound = self._plans()
         runtime = object.__new__(ComfyBaselineRuntime)
@@ -543,4 +655,3 @@ class RegionalLoraRoutingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -155,8 +155,10 @@ from k2core.backends.native_qwen import (  # noqa: E402
 )
 from k2core.backends.native_sampling import (  # noqa: E402
     DenoisingCheckpoint,
+    euler_flow_image_sample,
     euler_flow_sample,
     flux_time_shift,
+    partial_denoise_sigmas,
     prepare_noise,
     simple_sigmas,
 )
@@ -215,9 +217,11 @@ __all__ += [
     "build_krea2_transformer",
     "build_krea2_vae",
     "apply_native_loras",
+    "euler_flow_image_sample",
     "euler_flow_sample",
     "flux_time_shift",
     "load_tokenizer",
+    "partial_denoise_sigmas",
     "prepare_noise",
     "simple_sigmas",
     "tokenize_prompt",

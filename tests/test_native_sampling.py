@@ -3,7 +3,14 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from k2core.backends import euler_flow_sample, prepare_noise, simple_sigmas, tokenize_prompt
+from k2core.backends import (
+    euler_flow_image_sample,
+    euler_flow_sample,
+    partial_denoise_sigmas,
+    prepare_noise,
+    simple_sigmas,
+    tokenize_prompt,
+)
 
 
 class FakeTokenizer:
@@ -39,6 +46,34 @@ class NativeSamplingTests(unittest.TestCase):
         self.assertEqual(result, 1.25)
         self.assertEqual([item.step for item in checkpoints], [0, 1])
         self.assertEqual(checkpoints[0].model_output, 1.0)
+
+    def test_partial_denoise_schedule_matches_reference_truncation(self) -> None:
+        self.assertEqual(partial_denoise_sigmas(8, 1.0), simple_sigmas(8))
+        self.assertEqual(partial_denoise_sigmas(8, 0.25), simple_sigmas(32)[-9:])
+        self.assertEqual(partial_denoise_sigmas(8, 0.0), (0.0,))
+
+    def test_image_flow_initializes_from_source_and_preserves_masked_lanes(self) -> None:
+        checkpoints = []
+        self.assertEqual(
+            euler_flow_image_sample(
+                lambda latent, sigma: latent * 0 + sigma,
+                source_latent=2.0,
+                noise=10.0,
+                sigmas=(0.5, 0.25, 0.0),
+                denoise_mask=0.0,
+                checkpoint=checkpoints.append,
+            ),
+            2.0,
+        )
+        changed = euler_flow_image_sample(
+            lambda latent, sigma: latent * 0 + sigma,
+            source_latent=2.0,
+            noise=10.0,
+            sigmas=(0.5, 0.25, 0.0),
+            denoise_mask=1.0,
+        )
+        self.assertNotEqual(changed, 2.0)
+        self.assertEqual([item.step for item in checkpoints], [0, 1])
 
     def test_noise_uses_an_explicit_generator_without_global_manual_seed(self) -> None:
         class Generator:

@@ -47,9 +47,7 @@ class NativeKrea2VAE:
         torch = _import_runtime()
         resolved_device = _resolve_execution_device(torch, device)
         if latent.ndim != 5:
-            raise ValueError(
-                "Krea2 VAE latent must have shape (batch, 16, time, height, width)"
-            )
+            raise ValueError("Krea2 VAE latent must have shape (batch, 16, time, height, width)")
         if latent.shape[1] != KREA2_VAE_LATENT_CHANNELS:
             raise ValueError(
                 "Krea2 VAE latent must have "
@@ -58,23 +56,16 @@ class NativeKrea2VAE:
         if latent.shape[2] != 1:
             raise ValueError("clean Krea2 VAE decode currently requires one latent frame")
         if output_range not in {"minus_one_one", "zero_one"}:
-            raise ValueError(
-                "output_range must be either 'minus_one_one' or 'zero_one'"
-            )
+            raise ValueError("output_range must be either 'minus_one_one' or 'zero_one'")
 
         self.model.to(device=resolved_device)
         dtype = self.model.post_quant_conv.weight.dtype
         prepared = latent.to(device=resolved_device, dtype=dtype)
-        mean = torch.tensor(
-            self.model.config.latents_mean,
+        mean, std = self._latent_statistics(
+            torch,
             device=resolved_device,
             dtype=dtype,
-        ).view(1, KREA2_VAE_LATENT_CHANNELS, 1, 1, 1)
-        std = torch.tensor(
-            self.model.config.latents_std,
-            device=resolved_device,
-            dtype=dtype,
-        ).view(1, KREA2_VAE_LATENT_CHANNELS, 1, 1, 1)
+        )
         prepared = prepared * std + mean
 
         with torch.inference_mode():
@@ -82,6 +73,49 @@ class NativeKrea2VAE:
             if output_range == "zero_one":
                 decoded = (decoded / 2 + 0.5).clamp(0, 1)
         return decoded
+
+    def encode(
+        self,
+        pixels: Any,
+        *,
+        device: str = "cuda",
+    ):
+        """Encode BCHW RGB pixels in [0, 1] into normalized Krea2 latents."""
+
+        if self.model is None:
+            raise RuntimeError("native Krea2 VAE has been unloaded")
+        torch = _import_runtime()
+        resolved_device = _resolve_execution_device(torch, device)
+        if pixels.ndim != 4 or pixels.shape[1] != 3:
+            raise ValueError("Krea2 VAE pixels must have shape (batch, 3, height, width)")
+        if pixels.shape[-2] % KREA2_VAE_SCALE_FACTOR or (pixels.shape[-1] % KREA2_VAE_SCALE_FACTOR):
+            raise ValueError("Krea2 VAE image dimensions must be multiples of eight")
+
+        self.model.to(device=resolved_device)
+        dtype = self.model.quant_conv.weight.dtype
+        prepared = pixels.to(device=resolved_device, dtype=dtype).mul(2.0).sub(1.0).unsqueeze(2)
+        with torch.inference_mode():
+            posterior = self.model.encode(prepared, return_dict=False)[0]
+            encoded = posterior.mode()
+        mean, std = self._latent_statistics(
+            torch,
+            device=resolved_device,
+            dtype=dtype,
+        )
+        return (encoded - mean) / std
+
+    def _latent_statistics(self, torch, *, device: Any, dtype: Any):
+        mean = torch.tensor(
+            self.model.config.latents_mean,
+            device=device,
+            dtype=dtype,
+        ).view(1, KREA2_VAE_LATENT_CHANNELS, 1, 1, 1)
+        std = torch.tensor(
+            self.model.config.latents_std,
+            device=device,
+            dtype=dtype,
+        ).view(1, KREA2_VAE_LATENT_CHANNELS, 1, 1, 1)
+        return mean, std
 
     def unload(self) -> None:
         self.model = None
@@ -129,8 +163,7 @@ def build_krea2_vae(component: NativeComponent) -> NativeKrea2VAE:
         raise WeightMappingError(
             "Krea2 VAE executable state mapping was not strict",
             technical_detail=(
-                f"missing={incompatible.missing_keys}; "
-                f"unexpected={incompatible.unexpected_keys}"
+                f"missing={incompatible.missing_keys}; unexpected={incompatible.unexpected_keys}"
             ),
             backend_name="native",
             phase="vae",

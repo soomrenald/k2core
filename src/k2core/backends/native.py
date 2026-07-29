@@ -441,6 +441,16 @@ class NativeK2Backend:
                 payload=payload,
             )
         except Exception as error:
+            encoding = None
+            latent = None
+            images = None
+            transformer = None
+            attention_override = None
+            instrumentation = None
+            lora_routes = None
+            lora_reports = None
+            predict = None
+            checkpoint = None
             if self.device_manager is not None:
                 self._cleanup_after_failure("generation")
             structured = convert_error(
@@ -452,7 +462,8 @@ class NativeK2Backend:
             )
             if structured is error:
                 raise
-            raise structured from error
+            error.__traceback__ = None
+            raise structured from None
 
     def _edit_image(
         self,
@@ -859,6 +870,20 @@ class NativeK2Backend:
                 payload=payload,
             )
         except Exception as error:
+            encoding = None
+            source_latent = None
+            noise = None
+            denoise_mask = None
+            latent = None
+            images = None
+            pixels = None
+            transformer = None
+            attention_override = None
+            instrumentation = None
+            lora_routes = None
+            lora_reports = None
+            predict = None
+            checkpoint = None
             if self.device_manager is not None:
                 self._cleanup_after_failure("image_edit")
             structured = convert_error(
@@ -870,7 +895,8 @@ class NativeK2Backend:
             )
             if structured is error:
                 raise
-            raise structured from error
+            error.__traceback__ = None
+            raise structured from None
 
     def encode_image(self, request: ImageEncodeRequest) -> LatentResult:
         return self._unsupported(

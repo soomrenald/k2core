@@ -207,7 +207,7 @@ class NativeK2Backend:
             pipeline, config = self._require_loaded()
             manager = self._require_device_manager()
             manager.preflight("generation")
-            manager.reset_peak_stats()
+            manager.begin_request(allow_oom_retry=config.oom_recovery)
             registered_model = config.registered_model
             if registered_model is None or registered_model.tokenizer is None:
                 raise ConfigurationError(
@@ -385,17 +385,16 @@ class NativeK2Backend:
             token.raise_if_cancelled()
 
             emit("vae_decode", fraction=0.0)
-            vae = build_krea2_vae(
-                pipeline.vae,
-                tiling=manager.plan.vae_tiling,
-            )
-            try:
-                images = vae.decode(
+            images = self._run_vae(
+                pipeline,
+                manager,
+                phase="vae_decode",
+                operation=lambda vae: vae.decode(
                     latent,
                     device=manager.plan.vae_device,
-                )
-            finally:
-                vae.unload()
+                ),
+                diagnostic=diagnostic,
+            )
             token.raise_if_cancelled()
             emit("vae_decode", fraction=1.0)
 
@@ -425,6 +424,7 @@ class NativeK2Backend:
                 ),
             )
             payload["memory"] = manager.snapshot("generation complete")
+            payload["oom_recovery"] = manager.recovery_summary()
             if diagnostic is not None:
                 diagnostic(
                     "Native clean generation complete",
@@ -471,7 +471,7 @@ class NativeK2Backend:
             pipeline, config = self._require_loaded()
             manager = self._require_device_manager()
             manager.preflight("image_edit")
-            manager.reset_peak_stats()
+            manager.begin_request(allow_oom_retry=config.oom_recovery)
             registered_model = config.registered_model
             if registered_model is None or registered_model.tokenizer is None:
                 raise ConfigurationError(
@@ -561,6 +561,7 @@ class NativeK2Backend:
                     ),
                 )
                 payload["memory"] = manager.snapshot("zero-strength image editing complete")
+                payload["oom_recovery"] = manager.recovery_summary()
                 return GenerationResult(
                     backend_id=self.backend_id,
                     correlation_id=request.correlation_id,
@@ -633,17 +634,16 @@ class NativeK2Backend:
             )
             emit("image_encode", fraction=0.0)
             gpu_work_started = True
-            vae = build_krea2_vae(
-                pipeline.vae,
-                tiling=manager.plan.vae_tiling,
-            )
-            try:
-                source_latent = vae.encode(
+            source_latent = self._run_vae(
+                pipeline,
+                manager,
+                phase="vae_encode",
+                operation=lambda vae: vae.encode(
                     pixels,
                     device=manager.plan.vae_device,
-                ).float()
-            finally:
-                vae.unload()
+                ),
+                diagnostic=diagnostic,
+            ).float()
             emit("image_encode", fraction=1.0)
             token.raise_if_cancelled()
 
@@ -804,17 +804,16 @@ class NativeK2Backend:
             token.raise_if_cancelled()
 
             emit("vae_decode", fraction=0.0)
-            vae = build_krea2_vae(
-                pipeline.vae,
-                tiling=manager.plan.vae_tiling,
-            )
-            try:
-                images = vae.decode(
+            images = self._run_vae(
+                pipeline,
+                manager,
+                phase="vae_decode",
+                operation=lambda vae: vae.decode(
                     latent,
                     device=manager.plan.vae_device,
-                )
-            finally:
-                vae.unload()
+                ),
+                diagnostic=diagnostic,
+            )
             emit("vae_decode", fraction=1.0)
             candidate = _native_pil_image(images).crop(
                 (0, 0, source_image.width, source_image.height)
@@ -843,6 +842,7 @@ class NativeK2Backend:
                 regional_summary=regional_summary,
             )
             payload["memory"] = manager.snapshot("image editing complete")
+            payload["oom_recovery"] = manager.recovery_summary()
             if diagnostic is not None:
                 diagnostic(
                     "Native image editing complete",
@@ -879,24 +879,26 @@ class NativeK2Backend:
         )
 
     def decode_latents(self, request: LatentDecodeRequest) -> ImageResult:
-        pipeline, _config = self._require_loaded()
+        pipeline, config = self._require_loaded()
         manager = self._require_device_manager()
-        vae = build_krea2_vae(
-            pipeline.vae,
-            tiling=manager.plan.vae_tiling,
-        )
-        try:
-            images = vae.decode(
+        manager.begin_request(allow_oom_retry=config.oom_recovery)
+        images = self._run_vae(
+            pipeline,
+            manager,
+            phase="vae_decode",
+            operation=lambda vae: vae.decode(
                 request.latents,
                 device=manager.plan.vae_device,
-            )
-        finally:
-            vae.unload()
+            ),
+        )
         return ImageResult(
             backend_id=self.backend_id,
             correlation_id=request.correlation_id,
             images=images,
-            metadata={"normalized_latents": True},
+            metadata={
+                "normalized_latents": True,
+                "oom_recovery": manager.recovery_summary(),
+            },
         )
 
     def unload(self) -> None:
@@ -940,6 +942,47 @@ class NativeK2Backend:
         except Exception:
             # Cleanup telemetry must never replace the inference error that triggered it.
             pass
+
+    def _run_vae(
+        self,
+        pipeline: NativePipelineState,
+        manager: NativeDeviceManager,
+        *,
+        phase: str,
+        operation,
+        diagnostic: DiagnosticCallback | None = None,
+    ):
+        tiling = manager.plan.vae_tiling
+        while True:
+            vae = None
+            try:
+                vae = build_krea2_vae(
+                    pipeline.vae,
+                    tiling=tiling,
+                )
+                return operation(vae)
+            except Exception as error:
+                can_retry = (
+                    manager.is_oom(error)
+                    and not tiling
+                    and manager.plan.vae_device != "cpu"
+                    and manager.claim_oom_retry(phase, "vae_tiling")
+                )
+                if not can_retry:
+                    raise
+                manager.cleanup_after_failure(phase)
+                tiling = True
+                if diagnostic is not None:
+                    diagnostic(
+                        "Native VAE OOM detected; retrying once with tiled execution",
+                        {
+                            "phase": phase,
+                            "fallback": "vae_tiling",
+                        },
+                    )
+            finally:
+                if vae is not None:
+                    vae.unload()
 
     def _validate_clean_request(self, request: GenerationRequest) -> None:
         if not request.prompt.strip():

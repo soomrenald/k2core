@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
+from k2core.backends import NativeK2Backend
 from k2core.backends.native_device import NativeDeviceManager
 from k2core.inference import ConfigurationError, DTypePolicy, DevicePolicy, OutOfMemoryError
 
@@ -159,6 +162,72 @@ class NativeDeviceManagerTests(unittest.TestCase):
         self.assertEqual(cleanup["failed_phase"], "transformer")
         self.assertTrue(manager.is_oom(RuntimeError("HIP out of memory")))
         self.assertFalse(manager.is_oom(RuntimeError("shape mismatch")))
+
+    def test_request_has_at_most_one_explicit_oom_fallback(self) -> None:
+        manager = NativeDeviceManager(
+            DevicePolicy(),
+            torch=FakeTorch(),
+            memory_reader=lambda: (8 * 1024**3, 16 * 1024**3),
+        )
+
+        manager.begin_request(allow_oom_retry=True)
+
+        self.assertTrue(manager.claim_oom_retry("vae_decode", "vae_tiling"))
+        self.assertFalse(manager.claim_oom_retry("transformer", "cpu"))
+        self.assertEqual(
+            manager.recovery_summary(),
+            {
+                "retry_used": True,
+                "retry_remaining": False,
+                "events": (
+                    {
+                        "phase": "vae_decode",
+                        "fallback": "vae_tiling",
+                    },
+                ),
+            },
+        )
+        manager.begin_request(allow_oom_retry=False)
+        self.assertFalse(manager.claim_oom_retry("vae_encode", "vae_tiling"))
+
+    def test_backend_uses_one_tiled_vae_retry_after_oom(self) -> None:
+        manager = NativeDeviceManager(
+            DevicePolicy(),
+            torch=FakeTorch(),
+            memory_reader=lambda: (8 * 1024**3, 16 * 1024**3),
+        )
+        manager.begin_request(allow_oom_retry=True)
+        first = Mock()
+        second = Mock()
+        attempts = 0
+
+        def operation(vae):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("HIP out of memory")
+            return vae
+
+        diagnostics = []
+        with patch(
+            "k2core.backends.native.build_krea2_vae",
+            side_effect=[first, second],
+        ) as build:
+            result = NativeK2Backend()._run_vae(
+                SimpleNamespace(vae=object()),
+                manager,
+                phase="vae_decode",
+                operation=operation,
+                diagnostic=lambda message, payload: diagnostics.append((message, payload)),
+            )
+
+        self.assertIs(result, second)
+        self.assertEqual(build.call_args_list[0].kwargs["tiling"], False)
+        self.assertEqual(build.call_args_list[1].kwargs["tiling"], True)
+        first.unload.assert_called_once_with()
+        second.unload.assert_called_once_with()
+        self.assertTrue(manager.recovery_summary()["retry_used"])
+        self.assertIn("retrying once", diagnostics[0][0])
 
 
 if __name__ == "__main__":

@@ -57,6 +57,8 @@ class NativeDeviceManager:
             raise ValueError("native memory thresholds must not be negative")
         self._validate_dtype(policy.compute_dtype, usage="compute")
         self._validate_dtype(policy.weight_dtype, usage="weight")
+        self._retry_available = False
+        self._recovery_events: list[dict[str, str]] = []
         vae_request = "cpu" if cpu_vae else policy.vae_device
         self.plan = NativeDevicePlan(
             accelerator_available=self._accelerator_available,
@@ -168,6 +170,30 @@ class NativeDeviceManager:
     def reset_peak_stats(self) -> None:
         if self._accelerator_available:
             self.torch.cuda.reset_peak_memory_stats()
+
+    def begin_request(self, *, allow_oom_retry: bool) -> None:
+        self._retry_available = bool(allow_oom_retry)
+        self._recovery_events.clear()
+        self.reset_peak_stats()
+
+    def claim_oom_retry(self, phase: str, fallback: str) -> bool:
+        if not self._retry_available:
+            return False
+        self._retry_available = False
+        self._recovery_events.append(
+            {
+                "phase": phase,
+                "fallback": fallback,
+            }
+        )
+        return True
+
+    def recovery_summary(self) -> dict[str, Any]:
+        return {
+            "retry_used": bool(self._recovery_events),
+            "retry_remaining": self._retry_available,
+            "events": tuple(dict(event) for event in self._recovery_events),
+        }
 
     def release(self) -> dict[str, Any]:
         gc.collect()

@@ -142,6 +142,7 @@ from k2core.backends.native_loading import (  # noqa: E402
 from k2core.backends.native_lora import (  # noqa: E402
     NativeLoraReport,
     NativeLoraTarget,
+    NativeLokrTarget,
     apply_native_loras,
 )
 from k2core.backends.native_qwen import (  # noqa: E402
@@ -203,6 +204,7 @@ __all__ += [
     "NativeK2Backend",
     "NativeLoraReport",
     "NativeLoraTarget",
+    "NativeLokrTarget",
     "NativeModelLoader",
     "NativePipelineState",
     "NativeQwenTextEncoder",

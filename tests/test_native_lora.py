@@ -4,6 +4,7 @@ import unittest
 
 from k2core.backends.native_lora import (
     _group_lora_tensors,
+    _group_lokr_tensors,
     _map_lora_module,
 )
 from k2core.inference import WeightMappingError
@@ -12,9 +13,7 @@ from k2core.inference import WeightMappingError
 class NativeLoraMappingTests(unittest.TestCase):
     def test_maps_current_krea_linear_names(self) -> None:
         expected = {
-            "diffusion_model.blocks.0.attn.wq": (
-                "transformer_blocks.0.attn.to_q"
-            ),
+            "diffusion_model.blocks.0.attn.wq": ("transformer_blocks.0.attn.to_q"),
             "blocks.27.mlp.down": "transformer_blocks.27.ff.down",
             "diffusion_model.txtfusion.refiner_blocks.1.attn.wo": (
                 "text_fusion.refiner_blocks.1.attn.to_out.0"
@@ -53,9 +52,7 @@ class NativeLoraMappingTests(unittest.TestCase):
 
     def test_rejects_partial_unknown_and_bare_parameter_targets(self) -> None:
         with self.assertRaisesRegex(WeightMappingError, "complete pair"):
-            _group_lora_tensors(
-                {"blocks.0.attn.wq.lora_A.weight": object()}
-            )
+            _group_lora_tensors({"blocks.0.attn.wq.lora_A.weight": object()})
         with self.assertRaisesRegex(WeightMappingError, "unsupported"):
             _group_lora_tensors(
                 {
@@ -66,6 +63,33 @@ class NativeLoraMappingTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(WeightMappingError, "bare"):
             _map_lora_module("diffusion_model.last.modulation.lin")
+
+    def test_direct_lokr_requires_both_factors_and_rejects_decomposition(self) -> None:
+        grouped = _group_lokr_tensors(
+            {
+                "blocks.0.attn.wq.lokr_w1": "w1",
+                "blocks.0.attn.wq.lokr_w2": "w2",
+                "blocks.0.attn.wq.alpha": "sentinel",
+            }
+        )
+        self.assertEqual(
+            grouped["blocks.0.attn.wq"],
+            {
+                ".lokr_w1": "w1",
+                ".lokr_w2": "w2",
+                ".alpha": "sentinel",
+            },
+        )
+        with self.assertRaisesRegex(WeightMappingError, "incomplete"):
+            _group_lokr_tensors({"blocks.0.attn.wq.lokr_w1": object()})
+        with self.assertRaisesRegex(WeightMappingError, "decomposed"):
+            _group_lokr_tensors(
+                {
+                    "blocks.0.attn.wq.lokr_w1": object(),
+                    "blocks.0.attn.wq.lokr_w2": object(),
+                    "blocks.0.attn.wq.lokr_w2_a": object(),
+                }
+            )
 
 
 if __name__ == "__main__":

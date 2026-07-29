@@ -1706,7 +1706,7 @@ class ComfyBaselineRuntime:
                 )
 
         output_directory.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
         output_path = output_directory / f"{filename_prefix}_{stamp}_seed-{seed}.png"
         metadata = PngImagePlugin.PngInfo()
         metadata.add_text("k2lab_mode", "krea2_turbo_baseline")
@@ -1802,8 +1802,8 @@ class ComfyBaselineRuntime:
             raise RuntimeError("baseline components must be loaded before image editing")
         if not 1 <= steps <= 100:
             raise ValueError("image-edit steps must be between 1 and 100")
-        if not 0.0 < denoise <= 1.0:
-            raise ValueError("image-edit denoise must be in (0, 1]")
+        if not 0.0 <= denoise <= 1.0:
+            raise ValueError("image-edit denoise must be between zero and one")
         if not 0 <= latent_feather_pixels <= 256:
             raise ValueError("image-edit latent feather must be between 0 and 256 pixels")
         if not 0 <= composite_feather_pixels <= 256:
@@ -1812,23 +1812,6 @@ class ComfyBaselineRuntime:
             raise ValueError("reference description retention must be between zero and one")
         sampler = validate_sampler(sampler)
         scheduler = validate_scheduler(scheduler)
-
-        import numpy as np
-        import torch
-        from PIL import Image, PngImagePlugin
-
-        import comfy.model_management
-        import comfy.sample
-        import comfy.samplers
-
-        if sampler not in comfy.samplers.KSampler.SAMPLERS:
-            raise ValueError(
-                f"sampler {sampler!r} is unavailable in the installed ComfyUI runtime"
-            )
-        if scheduler not in comfy.samplers.KSampler.SCHEDULERS:
-            raise ValueError(
-                f"scheduler {scheduler!r} is unavailable in the installed ComfyUI runtime"
-            )
 
         source_path = image_path.expanduser().resolve()
         source_image, source_metadata = load_source_image(source_path)
@@ -1893,6 +1876,111 @@ class ComfyBaselineRuntime:
         )
         if not conditioned_prompt:
             raise ValueError("image editing requires prompt text")
+
+        if denoise == 0.0:
+            from PIL import PngImagePlugin
+
+            destination = (output_directory or source_path.parent).expanduser().resolve()
+            destination.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+            output_path = destination / f"{source_path.stem}_edited_{stamp}_seed-{seed}.png"
+            regional_summary = (
+                regional_plan.summary()
+                if regional_plan is not None
+                else {"backend": "disabled", "region_count": 0}
+            )
+            preserve_outside = not edit_entire_image
+            effective_composite_feather = min(
+                composite_feather_pixels,
+                latent_feather_pixels,
+            )
+            if preserve_outside:
+                mask = regional_composite_mask(
+                    source_image.size,
+                    target_regions,
+                    effective_composite_feather,
+                )
+                changed_bounds = mask.getbbox()
+            else:
+                changed_bounds = (0, 0, source_image.width, source_image.height)
+            projector_summary = {
+                "enabled": bool(projector_enabled),
+                "backend": "skipped_zero_strength",
+            }
+            edit_summary = {
+                "source_image": str(source_path),
+                "original_size": [source_image.width, source_image.height],
+                "aligned_size": [geometry.aligned_width, geometry.aligned_height],
+                "seed": seed,
+                "steps": steps,
+                "sampler": sampler,
+                "scheduler": scheduler,
+                "denoise": denoise,
+                "latent_feather_pixels": latent_feather_pixels,
+                "preserve_outside_regions": preserve_outside,
+                "composite_feather_pixels": composite_feather_pixels,
+                "effective_composite_feather_pixels": effective_composite_feather,
+                "edit_entire_image": edit_entire_image,
+                "preserve_identity": preserve_identity,
+                "reference_description_retention": reference_description_retention,
+                "reference_global_conditioning_applied": False,
+                "composite_bounds": list(changed_bounds) if changed_bounds else None,
+                "regional_prompting": regional_summary,
+                "projector": projector_summary,
+                "loras": [],
+            }
+            metadata = PngImagePlugin.PngInfo()
+            replaced_metadata = {
+                "k2lab_mode",
+                "source_image",
+                "image_edit",
+                "prompt",
+                "global_prompt",
+                "regional_prompting",
+                "loras",
+            }
+            if project_json:
+                replaced_metadata.add("k2lab_project")
+            for key, value in source_metadata.items():
+                if key not in replaced_metadata:
+                    metadata.add_text(key, value)
+            metadata.add_text("k2lab_mode", "krea2_regional_image_edit")
+            metadata.add_text("source_image", str(source_path))
+            metadata.add_text("prompt", conditioned_prompt)
+            metadata.add_text("global_prompt", prompt)
+            metadata.add_text("image_edit", json.dumps(edit_summary))
+            metadata.add_text("regional_prompting", json.dumps(regional_summary))
+            metadata.add_text("loras", "[]")
+            if project_json:
+                metadata.add_text("k2lab_project", json.dumps(project_json))
+            source_image.save(output_path, pnginfo=metadata)
+            return {
+                "image_path": str(output_path),
+                "source_image": str(source_path),
+                "width": source_image.width,
+                "height": source_image.height,
+                "seed": seed,
+                "image_edit": edit_summary,
+                "regional_prompting": regional_summary,
+                "loras": [],
+            }
+
+        import numpy as np
+        import torch
+        from PIL import Image, PngImagePlugin
+
+        import comfy.model_management
+        import comfy.sample
+        import comfy.samplers
+
+        if sampler not in comfy.samplers.KSampler.SAMPLERS:
+            raise ValueError(
+                f"sampler {sampler!r} is unavailable in the installed ComfyUI runtime"
+            )
+        if scheduler not in comfy.samplers.KSampler.SCHEDULERS:
+            raise ValueError(
+                f"scheduler {scheduler!r} is unavailable in the installed ComfyUI runtime"
+            )
 
         self._ensure_memory("before image-edit text encoding", event)
         positive = self.clip.encode_from_tokens_scheduled(
@@ -2112,8 +2200,19 @@ class ComfyBaselineRuntime:
             "loras": lora_reports,
         }
         metadata = PngImagePlugin.PngInfo()
+        replaced_metadata = {
+            "k2lab_mode",
+            "source_image",
+            "image_edit",
+            "prompt",
+            "global_prompt",
+            "regional_prompting",
+            "loras",
+        }
+        if project_json:
+            replaced_metadata.add("k2lab_project")
         for key, value in source_metadata.items():
-            if key not in {"k2lab_mode", "source_image", "image_edit", "k2lab_project"}:
+            if key not in replaced_metadata:
                 metadata.add_text(key, value)
         metadata.add_text("k2lab_mode", "krea2_regional_image_edit")
         metadata.add_text("source_image", str(source_path))
@@ -2122,7 +2221,7 @@ class ComfyBaselineRuntime:
         metadata.add_text("image_edit", json.dumps(edit_summary))
         metadata.add_text("regional_prompting", json.dumps(regional_summary))
         metadata.add_text("loras", json.dumps(lora_reports))
-        if project_json is not None:
+        if project_json:
             metadata.add_text("k2lab_project", json.dumps(project_json, separators=(",", ":")))
         output_image.save(output_path, pnginfo=metadata)
         return {

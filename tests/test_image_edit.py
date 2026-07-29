@@ -26,6 +26,7 @@ from k2core.project import (
 )
 from k2core.regions import PixelBox, RegionDefinition
 from k2core.regional_prompting import GLOBAL_EMPHASIS_SCOPE, PromptEmphasis
+from k2core.worker.runtime import ComfyBaselineRuntime
 
 
 class ImageEditGeometryTests(unittest.TestCase):
@@ -136,6 +137,38 @@ class ImageEditGeometryTests(unittest.TestCase):
 
         self.assertEqual(retained, (emphases[1],))
 
+    def test_comfy_zero_strength_returns_source_without_loading_runtime_modules(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_path = root / "source.png"
+            source = Image.new("RGB", (256, 256), (12, 34, 56))
+            metadata = PngImagePlugin.PngInfo()
+            metadata.add_text("fixture", "retained")
+            metadata.add_text("k2lab_project", '{"source":true}')
+            source.save(source_path, pnginfo=metadata)
+            runtime = ComfyBaselineRuntime(Path("/unused"))
+            runtime.model = object()
+            runtime.clip = object()
+            runtime.vae = object()
+
+            result = runtime.edit_image(
+                image_path=source_path,
+                prompt="keep the image unchanged",
+                regions=(),
+                loras=[],
+                denoise=0.0,
+                edit_entire_image=True,
+                output_directory=root,
+            )
+
+            with Image.open(result["image_path"]) as output:
+                self.assertEqual(output.convert("RGB").tobytes(), source.tobytes())
+                self.assertEqual(output.info["fixture"], "retained")
+                self.assertEqual(output.info["k2lab_project"], '{"source":true}')
+                summary = json.loads(output.info["image_edit"])
+            self.assertEqual(summary["denoise"], 0.0)
+            self.assertEqual(summary["projector"]["backend"], "skipped_zero_strength")
+
 
 class ImageEditProjectTests(unittest.TestCase):
     def test_project_round_trip_preserves_independent_edit_state_and_lora_scope(self) -> None:
@@ -245,4 +278,3 @@ class ImageEditProjectTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

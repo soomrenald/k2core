@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from k2core.backends.native_quant import replace_submodule
+from k2core.backends.native_instrumentation import NativeInstrumentation
 from k2core.backends.native_transformer import (
     NativeKrea2Transformer,
     _map_linear_module,
@@ -112,6 +113,7 @@ def apply_native_loras(
     specifications: Sequence[LoraSpec],
     *,
     routes: Sequence[LoraDeltaRoute] = (),
+    instrumentation: NativeInstrumentation | None = None,
 ) -> tuple[NativeLoraReport, ...]:
     """Validate every adapter, then install ordered forward deltas atomically."""
 
@@ -227,6 +229,21 @@ def apply_native_loras(
                     adapter,
                     route,
                     _target_route_kind(
+                        target.source_module,
+                        target.target_module,
+                    ),
+                    instrumentation=instrumentation,
+                    lora_id=item.specification.lora_id,
+                    source_module=target.source_module,
+                )
+            elif instrumentation is not None and instrumentation.enabled:
+                adapter = _instrumented_delta_module(
+                    nn,
+                    adapter,
+                    instrumentation,
+                    lora_id=item.specification.lora_id,
+                    source_module=target.source_module,
+                    route_kind=_target_route_kind(
                         target.source_module,
                         target.target_module,
                     ),
@@ -599,7 +616,17 @@ def _target_route_kind(source_module: str, target_module: str) -> str:
     return "combined"
 
 
-def _routed_delta_module(torch, nn, delta, route, route_kind: str):
+def _routed_delta_module(
+    torch,
+    nn,
+    delta,
+    route,
+    route_kind: str,
+    *,
+    instrumentation: NativeInstrumentation | None = None,
+    lora_id: str,
+    source_module: str,
+):
     class RoutedDelta(nn.Module):
         def __init__(self) -> None:
             super().__init__()
@@ -615,7 +642,17 @@ def _routed_delta_module(torch, nn, delta, route, route_kind: str):
             if mask is None:
                 mask = self._mask(inputs)
                 self._mask_cache[key] = mask
-            return applied * mask
+            applied = applied * mask
+            if instrumentation is not None:
+                instrumentation.observe_delta(
+                    lora_id=lora_id,
+                    source_module=source_module,
+                    route_kind=self.route_kind,
+                    applied=applied,
+                    route_mask=mask,
+                    route=self.route,
+                )
+            return applied
 
         def _mask(self, inputs):
             values, mask_shape = _route_mask_values_and_shape(
@@ -630,6 +667,34 @@ def _routed_delta_module(torch, nn, delta, route, route_kind: str):
             ).view(*mask_shape)
 
     return RoutedDelta()
+
+
+def _instrumented_delta_module(
+    nn,
+    delta,
+    instrumentation: NativeInstrumentation,
+    *,
+    lora_id: str,
+    source_module: str,
+    route_kind: str,
+):
+    class InstrumentedDelta(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.delta = delta
+
+        def forward(self, inputs):
+            applied = self.delta(inputs)
+            instrumentation.observe_delta(
+                lora_id=lora_id,
+                source_module=source_module,
+                route_kind=route_kind,
+                applied=applied,
+                route_mask=None,
+            )
+            return applied
+
+    return InstrumentedDelta()
 
 
 def _route_mask_values_and_shape(

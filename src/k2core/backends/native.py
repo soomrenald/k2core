@@ -9,6 +9,7 @@ from typing import Any, Sequence
 
 from k2core.backends import BackendCapabilities
 from k2core.backends.native_loading import NativeModelLoader, NativePipelineState
+from k2core.backends.native_instrumentation import NativeInstrumentation
 from k2core.backends.native_lora import apply_native_loras
 from k2core.backends.native_qwen import build_qwen_text_encoder
 from k2core.backends.native_sampling import (
@@ -240,6 +241,18 @@ class NativeK2Backend:
                 if request.loras
                 else ()
             )
+            instrumentation = (
+                NativeInstrumentation(
+                    request.instrumentation,
+                    adaptation_routes=(
+                        tuple(lora_routes) if request.regional_lora_delta_adaptation else ()
+                    ),
+                )
+                if (request.instrumentation.enabled or request.regional_lora_delta_adaptation)
+                else None
+            )
+            if instrumentation is not None and instrumentation.enabled:
+                instrumentation.record_attention_masks(bound_regional_plan)
             token.raise_if_cancelled()
             emit(
                 "text_encoding",
@@ -260,7 +273,11 @@ class NativeK2Backend:
             ).to(execution_device)
             sigmas = simple_sigmas(request.steps)
             attention_override = (
-                KreaSpatialAttentionOverride(bound_regional_plan)
+                KreaSpatialAttentionOverride(
+                    bound_regional_plan,
+                    lora_delta_adaptation=request.regional_lora_delta_adaptation,
+                    lora_delta_adaptation_gain=(request.regional_lora_delta_adaptation_gain),
+                )
                 if bound_regional_plan is not None
                 and (bound_regional_plan.spans or bound_regional_plan.emphases)
                 else None
@@ -288,6 +305,13 @@ class NativeK2Backend:
                         completed,
                         request.steps,
                     )
+                    if request.regional_lora_delta_adaptation and instrumentation is not None:
+                        attention_override.set_lora_delta_scales(
+                            instrumentation.regional_attention_scales(
+                                request.regional_lora_delta_adaptation_gain
+                            )
+                        )
+                        instrumentation.reset_step_measurements()
                 emit(
                     "diffusion",
                     step=completed,
@@ -304,6 +328,7 @@ class NativeK2Backend:
                     transformer,
                     request.loras,
                     routes=lora_routes,
+                    instrumentation=instrumentation,
                 )
                 latent = euler_flow_sample(
                     predict,
@@ -349,6 +374,11 @@ class NativeK2Backend:
                 images,
                 lora_reports,
                 regional_summary=regional_summary,
+                instrumentation_summary=(
+                    instrumentation.summary()
+                    if instrumentation is not None and instrumentation.enabled
+                    else None
+                ),
             )
             if diagnostic is not None:
                 diagnostic(
@@ -563,6 +593,7 @@ def _save_native_image(
     lora_reports: Sequence[Any] = (),
     *,
     regional_summary: dict[str, Any] | None = None,
+    instrumentation_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     try:
         from PIL import Image, PngImagePlugin
@@ -616,6 +647,11 @@ def _save_native_image(
             separators=(",", ":"),
         ),
     )
+    if instrumentation_summary is not None:
+        metadata.add_text(
+            "native_instrumentation",
+            json.dumps(instrumentation_summary, separators=(",", ":")),
+        )
     metadata.add_text("size", f"{image.width}x{image.height}")
     if request.project_json:
         metadata.add_text(
@@ -623,7 +659,7 @@ def _save_native_image(
             json.dumps(dict(request.project_json), separators=(",", ":")),
         )
     image.save(output_path, pnginfo=metadata)
-    return {
+    payload = {
         "image_path": str(output_path),
         "width": image.width,
         "height": image.height,
@@ -642,6 +678,9 @@ def _save_native_image(
         "projector": {"enabled": False, "backend": "disabled"},
         "post_upscale": {"enabled": False, "backend": "disabled", "scale": 1},
     }
+    if instrumentation_summary is not None:
+        payload["native_instrumentation"] = instrumentation_summary
+    return payload
 
 
 __all__ = ["NativeK2Backend"]

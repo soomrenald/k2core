@@ -123,6 +123,50 @@ class LoraSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class InstrumentationConfig:
+    q_projection_deltas: bool = False
+    k_projection_deltas: bool = False
+    v_projection_deltas: bool = False
+    hidden_state_deltas: bool = False
+    attention_output_deltas: bool = False
+    mlp_output_deltas: bool = False
+    residual_deltas: bool = False
+    token_modification_flags: bool = False
+    attention_masks: bool = False
+
+    @property
+    def enabled(self) -> bool:
+        return any(
+            (
+                self.q_projection_deltas,
+                self.k_projection_deltas,
+                self.v_projection_deltas,
+                self.hidden_state_deltas,
+                self.attention_output_deltas,
+                self.mlp_output_deltas,
+                self.residual_deltas,
+                self.token_modification_flags,
+                self.attention_masks,
+            )
+        )
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any] | None):
+        values = payload if isinstance(payload, Mapping) else {}
+        return cls(
+            q_projection_deltas=bool(values.get("q_projection_deltas", False)),
+            k_projection_deltas=bool(values.get("k_projection_deltas", False)),
+            v_projection_deltas=bool(values.get("v_projection_deltas", False)),
+            hidden_state_deltas=bool(values.get("hidden_state_deltas", False)),
+            attention_output_deltas=bool(values.get("attention_output_deltas", False)),
+            mlp_output_deltas=bool(values.get("mlp_output_deltas", False)),
+            residual_deltas=bool(values.get("residual_deltas", False)),
+            token_modification_flags=bool(values.get("token_modification_flags", False)),
+            attention_masks=bool(values.get("attention_masks", False)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ProgressEvent:
     correlation_id: str
     phase: str
@@ -173,6 +217,7 @@ class GenerationRequest:
     upscale_scale: int = 2
     upscale_method: str = "lanczos"
     upscale_model_path: Path | None = None
+    instrumentation: InstrumentationConfig = field(default_factory=InstrumentationConfig)
     project_json: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -240,6 +285,7 @@ class GenerationRequest:
             upscale_model_path=(
                 Path(payload["upscale_model_path"]) if payload.get("upscale_model_path") else None
             ),
+            instrumentation=InstrumentationConfig.from_payload(payload.get("instrumentation")),
             project_json=(
                 payload["project_json"] if isinstance(payload.get("project_json"), Mapping) else {}
             ),

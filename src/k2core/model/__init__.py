@@ -10,15 +10,44 @@ from k2core.model.artifacts import (
     read_safetensors_header,
     read_safetensors_summary,
 )
+from k2core.model.manifests import validate_tensor_header
+from k2core.model.registry import (
+    REGISTRY_SCHEMA_VERSION,
+    SUPPORTED_ARCHITECTURES,
+    ComponentReference,
+    ComponentValidation,
+    ModelRegistry,
+    ModelValidation,
+    RegisteredModel,
+    RegistryValidation,
+    load_model_registry,
+    model_registry_from_document,
+    scan_legacy_comfyui_models,
+    sha256_file,
+    validate_model_registry,
+)
 
 __all__ = [
     "ArtifactKind",
     "ArtifactSet",
+    "ComponentReference",
+    "ComponentValidation",
     "ModelArtifact",
+    "ModelRegistry",
+    "ModelValidation",
+    "REGISTRY_SCHEMA_VERSION",
+    "RegisteredModel",
+    "RegistryValidation",
     "SafetensorsSummary",
+    "SUPPORTED_ARCHITECTURES",
     "discover_krea_transformers",
     "discover_model_artifacts",
+    "load_model_registry",
+    "model_registry_from_document",
     "read_safetensors_header",
     "read_safetensors_summary",
+    "scan_legacy_comfyui_models",
+    "sha256_file",
+    "validate_model_registry",
+    "validate_tensor_header",
 ]
-

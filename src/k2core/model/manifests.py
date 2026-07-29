@@ -59,7 +59,13 @@ def _indexed_count(tensor_names: set[str], expression: str) -> int:
     return len({int(match.group(1)) for name in tensor_names if (match := matcher.match(name))})
 
 
-def _validate(kind: ArtifactKind, tensors: dict[str, Any]) -> tuple[list[str], list[str]]:
+def validate_tensor_header(
+    kind: ArtifactKind,
+    header: dict[str, Any],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Validate an architecture fingerprint using safetensors header data only."""
+
+    tensors = {name: value for name, value in header.items() if name != "__metadata__"}
     errors: list[str] = []
     warnings: list[str] = []
     for name, expected_shape in EXPECTED_SHAPES[kind].items():
@@ -82,14 +88,14 @@ def _validate(kind: ArtifactKind, tensors: dict[str, Any]) -> tuple[list[str], l
         count = _indexed_count(names, r"model\.layers\.(\d+)\.")
         if count != 36:
             errors.append(f"expected 36 Qwen3-VL text layers, found {count}")
-    return errors, warnings
+    return tuple(errors), tuple(warnings)
 
 
 def build_tensor_manifest(artifact: ModelArtifact, output_directory: Path) -> ManifestResult:
     header = read_safetensors_header(artifact.path)
     metadata = header.get("__metadata__", {})
     tensors = {name: value for name, value in header.items() if name != "__metadata__"}
-    errors, warnings = _validate(artifact.kind, tensors)
+    errors, warnings = validate_tensor_header(artifact.kind, header)
     output_directory.mkdir(parents=True, exist_ok=True)
     output_path = output_directory / f"{artifact.kind.value}_tensor_manifest.json"
     document = {
@@ -124,4 +130,3 @@ def build_tensor_manifest(artifact: ModelArtifact, output_directory: Path) -> Ma
         errors=tuple(errors),
         warnings=tuple(warnings),
     )
-

@@ -138,37 +138,51 @@ class InferenceContractTests(unittest.TestCase):
                 cfg=2.0,
             )
 
-    def test_native_backend_advertises_regional_prompting_and_rejects_regional_loras(
+    def test_native_backend_advertises_regional_prompting_and_loras(
         self,
     ) -> None:
         backend = NativeK2Backend()
         capabilities = backend.capabilities()
         self.assertEqual(
             capabilities.modes,
-            frozenset({"text_to_image", "ordinary_lora", "regional_prompting"}),
+            frozenset(
+                {
+                    "text_to_image",
+                    "ordinary_lora",
+                    "regional_prompting",
+                    "regional_lora",
+                }
+            ),
         )
         self.assertTrue(capabilities.metadata["developer_only"])
-        with self.assertRaisesRegex(UnsupportedFeatureError, "regional LoRAs"):
-            backend.generate(
-                GenerationRequest(
-                    correlation_id="native-unsupported",
-                    prompt="fixture",
-                    width=512,
-                    height=512,
-                    steps=8,
-                    seed=1,
-                    output_directory=Path("/tmp"),
-                    loras=(
-                        LoraSpec(
-                            lora_id="one",
-                            name="one",
-                            path=Path("/tmp/one.safetensors"),
-                            global_scope=False,
-                            region_ids=("one-region",),
-                        ),
+        backend._validate_clean_request(
+            GenerationRequest(
+                correlation_id="native-regional-lora",
+                prompt="fixture",
+                width=512,
+                height=512,
+                steps=8,
+                seed=1,
+                output_directory=Path("/tmp"),
+                regions=(
+                    RegionDefinition(
+                        "one-region",
+                        "One",
+                        PixelBox(0, 0, 256, 512),
+                        "a vase",
                     ),
-                )
+                ),
+                loras=(
+                    LoraSpec(
+                        lora_id="one",
+                        name="one",
+                        path=Path("/tmp/one.safetensors"),
+                        global_scope=False,
+                        region_ids=("one-region",),
+                    ),
+                ),
             )
+        )
 
     def test_native_regional_plan_uses_shared_k2core_semantics(self) -> None:
         request = GenerationRequest(

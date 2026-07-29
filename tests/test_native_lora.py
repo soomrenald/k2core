@@ -6,8 +6,11 @@ from k2core.backends.native_lora import (
     _group_lora_tensors,
     _group_lokr_tensors,
     _map_lora_module,
+    _route_mask_values_and_shape,
+    _target_route_kind,
 )
 from k2core.inference import WeightMappingError
+from k2core.regional_lora import LoraDeltaRoute
 
 
 class NativeLoraMappingTests(unittest.TestCase):
@@ -90,6 +93,70 @@ class NativeLoraMappingTests(unittest.TestCase):
                     "blocks.0.attn.wq.lokr_w2_a": object(),
                 }
             )
+
+    def test_native_regional_route_masks_cover_every_krea_stream_shape(self) -> None:
+        route = LoraDeltaRoute(
+            lora_id="regional",
+            display_name="Regional",
+            strength=1.0,
+            global_scope=False,
+            region_ids=("right",),
+            region_names=("Right",),
+            text_token_mask=(0.0, 1.0, 1.0),
+            image_token_mask=(0.0, 1.0),
+        )
+
+        self.assertEqual(
+            _route_mask_values_and_shape(
+                route,
+                "combined",
+                (1, 5, 8),
+            ),
+            ((0.0, 1.0, 1.0, 0.0, 1.0), (1, 5, 1)),
+        )
+        self.assertEqual(
+            _route_mask_values_and_shape(
+                route,
+                "text_refiner",
+                (1, 3, 8),
+            ),
+            ((0.0, 1.0, 1.0), (1, 3, 1)),
+        )
+        self.assertEqual(
+            _route_mask_values_and_shape(
+                route,
+                "text_layerwise",
+                (6, 12, 8),
+            ),
+            ((0.0, 1.0, 1.0, 0.0, 1.0, 1.0), (6, 1, 1)),
+        )
+        self.assertEqual(
+            _route_mask_values_and_shape(
+                route,
+                "text_projector",
+                (1, 3, 12, 8),
+            ),
+            ((0.0, 1.0, 1.0), (1, 3, 1, 1)),
+        )
+        with self.assertRaisesRegex(ValueError, "one token axis"):
+            _route_mask_values_and_shape(
+                route,
+                "combined",
+                (1, 7, 8),
+            )
+
+    def test_native_route_kind_matches_krea_streams(self) -> None:
+        cases = {
+            "diffusion_model.txtfusion.layerwise_blocks.0.attn.wq": ("text_layerwise"),
+            "diffusion_model.txtfusion.projector": "text_projector",
+            "diffusion_model.txtfusion.refiner_blocks.0.attn.wq": ("text_refiner"),
+            "diffusion_model.txtmlp.1": "text_refiner",
+            "diffusion_model.blocks.0.attn.wq": "combined",
+        }
+        self.assertEqual(
+            {source: _target_route_kind(source, "") for source in cases},
+            cases,
+        )
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from k2core.backends.native_transformer import (
 from k2core.inference.errors import ConfigurationError, WeightMappingError
 from k2core.inference.schemas import LoraSpec
 from k2core.model import sha256_file
+from k2core.regional_lora import LoraDeltaRoute, route_allows_adapter_target
 
 
 _PAIR_SUFFIXES = (
@@ -65,11 +66,14 @@ class NativeLoraReport:
     strength: float
     tensor_count: int
     target_count: int
+    applied_target_count: int
     target_modules: tuple[str, ...]
     adapter_types: tuple[str, ...]
     ranks: tuple[int, ...]
     adapter_bytes: int
     unmatched_keys: tuple[str, ...]
+    locality_skipped_targets: tuple[str, ...]
+    route: Mapping[str, Any] | None
     status: str
 
     def to_payload(self) -> dict[str, Any]:
@@ -81,11 +85,15 @@ class NativeLoraReport:
             "strength": self.strength,
             "tensor_count": self.tensor_count,
             "target_count": self.target_count,
+            "applied_target_count": self.applied_target_count,
             "target_modules": list(self.target_modules),
             "adapter_types": list(self.adapter_types),
             "ranks": list(self.ranks),
             "adapter_bytes": self.adapter_bytes,
             "unmatched_keys": list(self.unmatched_keys),
+            "locality_skipped_target_count": len(self.locality_skipped_targets),
+            "locality_skipped_targets": list(self.locality_skipped_targets),
+            "route": dict(self.route) if self.route is not None else None,
             "status": self.status,
         }
 
@@ -102,6 +110,8 @@ class _LoadedLora:
 def apply_native_loras(
     transformer: NativeKrea2Transformer,
     specifications: Sequence[LoraSpec],
+    *,
+    routes: Sequence[LoraDeltaRoute] = (),
 ) -> tuple[NativeLoraReport, ...]:
     """Validate every adapter, then install ordered forward deltas atomically."""
 
@@ -113,9 +123,29 @@ def apply_native_loras(
     torch, nn, functional = _import_runtime()
     loaded = tuple(_load_lora(specification) for specification in specifications)
     active = tuple(item for item in loaded if item.specification.strength != 0.0)
+    routes_by_id = {route.lora_id: route for route in routes}
+    if len(routes_by_id) != len(routes):
+        raise WeightMappingError(
+            "Native LoRA routes must have unique adapter IDs.",
+            backend_name="native",
+            phase="lora",
+        )
+    for item in active:
+        specification = item.specification
+        if (
+            not specification.global_scope or specification.region_ids
+        ) and specification.lora_id not in routes_by_id:
+            raise WeightMappingError(
+                f"Regional LoRA has no compiled route: {specification.name}",
+                backend_name="native",
+                phase="lora",
+            )
 
     target_adapters: dict[str, list[Any]] = {}
+    applied_targets: dict[str, list[str]] = {item.specification.lora_id: [] for item in loaded}
+    skipped_targets: dict[str, list[str]] = {item.specification.lora_id: [] for item in loaded}
     for item in active:
+        route = routes_by_id.get(item.specification.lora_id)
         for target in item.targets:
             try:
                 base = transformer.model.get_submodule(target.target_module)
@@ -184,7 +214,40 @@ def apply_native_loras(
                     target.w2,
                     target.scale,
                 )
+            if route is not None and not route_allows_adapter_target(
+                route,
+                target.source_module,
+            ):
+                skipped_targets[item.specification.lora_id].append(target.source_module)
+                continue
+            if route is not None and not route.global_scope:
+                adapter = _routed_delta_module(
+                    torch,
+                    nn,
+                    adapter,
+                    route,
+                    _target_route_kind(
+                        target.source_module,
+                        target.target_module,
+                    ),
+                )
             target_adapters.setdefault(target.target_module, []).append(adapter)
+            applied_targets[item.specification.lora_id].append(target.target_module)
+
+    empty_regional = [
+        item.specification.name
+        for item in active
+        if (route := routes_by_id.get(item.specification.lora_id)) is not None
+        and not route.global_scope
+        and not applied_targets[item.specification.lora_id]
+    ]
+    if empty_regional:
+        raise WeightMappingError(
+            "Regional LoRA has no targets that can be routed locally.",
+            technical_detail=", ".join(empty_regional),
+            backend_name="native",
+            phase="lora",
+        )
 
     wrapper = _adapter_linear_class(nn)
     for target_module in sorted(target_adapters):
@@ -204,7 +267,8 @@ def apply_native_loras(
             strength=item.specification.strength,
             tensor_count=item.tensor_count,
             target_count=len(item.targets),
-            target_modules=tuple(target.target_module for target in item.targets),
+            applied_target_count=len(applied_targets[item.specification.lora_id]),
+            target_modules=tuple(applied_targets[item.specification.lora_id]),
             adapter_types=tuple(
                 sorted(
                     {
@@ -220,8 +284,18 @@ def apply_native_loras(
             ),
             adapter_bytes=sum(target.storage_bytes for target in item.targets),
             unmatched_keys=(),
+            locality_skipped_targets=tuple(skipped_targets[item.specification.lora_id]),
+            route=(
+                routes_by_id[item.specification.lora_id].summary()
+                if item.specification.lora_id in routes_by_id
+                else None
+            ),
             status=(
-                "disabled_zero_strength" if item.specification.strength == 0.0 else "applied_global"
+                "disabled_zero_strength"
+                if item.specification.strength == 0.0
+                else "applied_regional"
+                if not item.specification.global_scope
+                else "applied_global"
             ),
         )
         for item in loaded
@@ -229,13 +303,12 @@ def apply_native_loras(
 
 
 def _load_lora(specification: LoraSpec) -> _LoadedLora:
-    if not specification.global_scope or specification.region_ids:
+    if not specification.global_scope and not specification.region_ids:
         raise WeightMappingError(
-            "Ordinary native LoRA loading requires global scope.",
+            "Regional native LoRA loading requires at least one region.",
             technical_detail=specification.name,
             backend_name="native",
             phase="lora",
-            remediation="Use the ComfyUI backend until regional LoRA Gate 8.",
         )
     path = specification.path.expanduser().resolve(strict=True)
     if path.suffix.casefold() != ".safetensors":
@@ -505,6 +578,96 @@ def _adapter_linear_class(nn):
             return output
 
     return AdapterLinear
+
+
+def _target_route_kind(source_module: str, target_module: str) -> str:
+    lowered_source = source_module.casefold()
+    lowered_target = target_module.casefold()
+    if "txtfusion.layerwise_blocks." in lowered_source or (
+        "text_fusion.layerwise_blocks." in lowered_target
+    ):
+        return "text_layerwise"
+    if "txtfusion.projector" in lowered_source or lowered_target == ("text_fusion.projector"):
+        return "text_projector"
+    if (
+        ".txtfusion." in lowered_source
+        or ".txtmlp." in lowered_source
+        or lowered_target.startswith("text_fusion.")
+        or lowered_target.startswith("txt_in.")
+    ):
+        return "text_refiner"
+    return "combined"
+
+
+def _routed_delta_module(torch, nn, delta, route, route_kind: str):
+    class RoutedDelta(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.delta = delta
+            self.route = route
+            self.route_kind = route_kind
+            self._mask_cache = {}
+
+        def forward(self, inputs):
+            applied = self.delta(inputs)
+            key = (tuple(inputs.shape), inputs.device, inputs.dtype)
+            mask = self._mask_cache.get(key)
+            if mask is None:
+                mask = self._mask(inputs)
+                self._mask_cache[key] = mask
+            return applied * mask
+
+        def _mask(self, inputs):
+            values, mask_shape = _route_mask_values_and_shape(
+                self.route,
+                self.route_kind,
+                tuple(inputs.shape),
+            )
+            return torch.tensor(
+                values,
+                device=inputs.device,
+                dtype=inputs.dtype,
+            ).view(*mask_shape)
+
+    return RoutedDelta()
+
+
+def _route_mask_values_and_shape(
+    route: LoraDeltaRoute,
+    route_kind: str,
+    input_shape: tuple[int, ...],
+) -> tuple[tuple[float, ...], tuple[int, ...]]:
+    if route_kind == "text_layerwise":
+        values = route.layerwise_text_batch_mask(int(input_shape[0]))
+        return values, (len(values), 1, 1)
+    if route_kind == "text_projector":
+        values = route.sequence_mask(
+            int(input_shape[1]),
+            text_fusion=True,
+        )
+        return values, (1, len(values), 1, 1)
+
+    text_fusion = route_kind == "text_refiner"
+    text_count = len(route.text_token_mask)
+    image_count = len(route.image_token_mask)
+    expected_counts = {text_count} if text_fusion else {image_count, text_count + image_count}
+    token_axes = [
+        axis for axis, length in enumerate(input_shape[:-1]) if int(length) in expected_counts
+    ]
+    if len(token_axes) != 1:
+        raise ValueError(
+            f"LoRA route {route.display_name!r} could not identify one "
+            f"token axis in input shape {input_shape}; expected one of "
+            f"{sorted(expected_counts)}"
+        )
+    token_axis = token_axes[0]
+    values = route.sequence_mask(
+        int(input_shape[token_axis]),
+        text_fusion=text_fusion,
+    )
+    mask_shape = [1] * len(input_shape)
+    mask_shape[token_axis] = len(values)
+    return values, tuple(mask_shape)
 
 
 def _import_runtime():

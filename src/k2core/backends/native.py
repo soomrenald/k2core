@@ -45,6 +45,10 @@ from k2core.inference.schemas import (
     ProgressEvent,
 )
 from k2core.output import validate_filename_prefix
+from k2core.regional_lora import (
+    character_identity_triggers,
+    compile_lora_delta_routes,
+)
 from k2core.regional_prompting import (
     BoundRegionalPromptPlan,
     RegionalPromptPlan,
@@ -63,7 +67,14 @@ class NativeK2Backend:
     def capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
             backend_id=self.backend_id,
-            modes=frozenset({"text_to_image", "ordinary_lora", "regional_prompting"}),
+            modes=frozenset(
+                {
+                    "text_to_image",
+                    "ordinary_lora",
+                    "regional_prompting",
+                    "regional_lora",
+                }
+            ),
             accelerator_vendors=frozenset({"cuda", "rocm"}),
             parameters=(
                 {"name": "sampler", "values": ("euler",)},
@@ -217,6 +228,18 @@ class NativeK2Backend:
                     "Unified spatial prompt prepared",
                     bound_regional_plan.summary(),
                 )
+            lora_routes = (
+                compile_lora_delta_routes(
+                    [item.to_payload() for item in request.loras],
+                    width=request.width,
+                    height=request.height,
+                    text_token_count=len(encoding.tokens.conditioned_ids),
+                    regional_plan=regional_plan,
+                    bound_plan=bound_regional_plan,
+                )
+                if request.loras
+                else ()
+            )
             token.raise_if_cancelled()
             emit(
                 "text_encoding",
@@ -277,7 +300,11 @@ class NativeK2Backend:
                 )
 
             try:
-                lora_reports = apply_native_loras(transformer, request.loras)
+                lora_reports = apply_native_loras(
+                    transformer,
+                    request.loras,
+                    routes=lora_routes,
+                )
                 latent = euler_flow_sample(
                     predict,
                     latent,
@@ -413,8 +440,6 @@ class NativeK2Backend:
             unsupported.append("negative prompts")
         if request.denoise != 1.0:
             unsupported.append("partial denoise")
-        if any(not item.global_scope or item.region_ids for item in request.loras):
-            unsupported.append("regional LoRAs")
         if request.projector_enabled:
             unsupported.append("projector controls")
         if request.post_upscale:
@@ -472,6 +497,9 @@ def _compile_native_regional_plan(
         subject_fill=request.regional_subject_fill,
         late_step_scale=request.regional_late_step_scale,
         emphases=request.prompt_emphases,
+        character_identity_triggers=character_identity_triggers(
+            [item.to_payload() for item in request.loras]
+        ),
     )
 
 

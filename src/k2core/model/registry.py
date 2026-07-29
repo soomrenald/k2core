@@ -156,20 +156,16 @@ def load_model_registry(path: Path) -> ModelRegistry:
     configured_path = path.expanduser()
     with configured_path.open("rb") as handle:
         document = tomllib.load(handle)
-    return model_registry_from_document(document, base=configured_path.parent)
+    return model_registry_from_document(document)
 
 
-def model_registry_from_document(
-    document: dict[str, Any],
-    *,
-    base: Path | None = None,
-) -> ModelRegistry:
+def model_registry_from_document(document: dict[str, Any]) -> ModelRegistry:
     if not isinstance(document, dict):
         raise ValueError("model registry must be a TOML table")
     raw_models = document.get("models")
     if not isinstance(raw_models, list):
         raise ValueError("model registry must contain one or more [[models]] tables")
-    models = tuple(_registered_model(item, base=base) for item in raw_models)
+    models = tuple(_registered_model(item) for item in raw_models)
     if not models:
         raise ValueError("model registry must contain one or more [[models]] tables")
     return ModelRegistry(
@@ -310,30 +306,27 @@ def _validate_component(
     )
 
 
-def _registered_model(value: Any, *, base: Path | None) -> RegisteredModel:
+def _registered_model(value: Any) -> RegisteredModel:
     if not isinstance(value, dict):
         raise ValueError("each [[models]] entry must be a TOML table")
     return RegisteredModel(
         name=_required_string(value, "name"),
         architecture=_required_string(value, "architecture"),
         default_dtype=str(value.get("default_dtype", "bfloat16")),
-        transformer=_component(value, ArtifactKind.TRANSFORMER, base=base),
-        text_encoder=_component(value, ArtifactKind.TEXT_ENCODER, base=base),
-        vae=_component(value, ArtifactKind.VAE, base=base),
+        transformer=_component(value, ArtifactKind.TRANSFORMER),
+        text_encoder=_component(value, ArtifactKind.TEXT_ENCODER),
+        vae=_component(value, ArtifactKind.VAE),
     )
 
 
 def _component(
     model: dict[str, Any],
     kind: ArtifactKind,
-    *,
-    base: Path | None,
 ) -> ComponentReference:
     value = model.get(kind.value)
     if not isinstance(value, dict):
         raise ValueError(f"model entry requires a [{kind.value}] component table")
-    raw_path = Path(_required_string(value, "path")).expanduser()
-    path = raw_path if raw_path.is_absolute() or base is None else base / raw_path
+    path = Path(_required_string(value, "path")).expanduser()
     return ComponentReference(path=path, sha256=_required_string(value, "sha256"))
 
 

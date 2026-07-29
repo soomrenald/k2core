@@ -143,6 +143,38 @@ class ModelRegistryTests(unittest.TestCase):
             self.assertIn("does not exist", result.models[0].components[0].errors[0])
             self.assertTrue(transformer.exists())
 
+    def test_relative_component_path_is_rejected_by_validation(self) -> None:
+        registry = ModelRegistry(
+            models=(
+                RegisteredModel(
+                    name="relative",
+                    architecture="krea2",
+                    transformer=ComponentReference(
+                        path=Path("transformer.safetensors"),
+                        sha256="0" * 64,
+                    ),
+                    text_encoder=ComponentReference(
+                        path=Path("text.safetensors"),
+                        sha256="0" * 64,
+                    ),
+                    vae=ComponentReference(
+                        path=Path("vae.safetensors"),
+                        sha256="0" * 64,
+                    ),
+                ),
+            )
+        )
+
+        result = validate_model_registry(registry)
+
+        self.assertFalse(result.valid)
+        self.assertTrue(
+            all(
+                "path must be absolute" in component.errors[0]
+                for component in result.models[0].components
+            )
+        )
+
     def test_wrong_architecture_is_reported(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

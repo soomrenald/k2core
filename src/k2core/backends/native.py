@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Any, Sequence
 
 from k2core.backends import BackendCapabilities
+from k2core.backends.native_device import NativeDeviceManager
 from k2core.backends.native_loading import NativeModelLoader, NativePipelineState
 from k2core.backends.native_instrumentation import NativeInstrumentation
 from k2core.backends.native_lora import apply_native_loras
@@ -77,6 +78,7 @@ class NativeK2Backend:
     loader: NativeModelLoader | None = None
     pipeline: NativePipelineState | None = None
     config: PipelineConfig | None = None
+    device_manager: NativeDeviceManager | None = None
 
     def capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
@@ -147,12 +149,24 @@ class NativeK2Backend:
                 )
         if self.pipeline is not None:
             self.unload()
-        self.loader = self.loader or NativeModelLoader()
-        self.pipeline = self.loader.load(
-            config.registered_model,
-            device_policy=config.device_policy,
-            strict=config.strict_loading,
+        manager = NativeDeviceManager(
+            config.device_policy,
+            reserve_vram_gb=config.reserve_vram_gb,
+            minimum_system_ram_gb=config.minimum_system_ram_gb,
+            cpu_vae=config.cpu_vae,
         )
+        initial_memory = manager.preflight("model_loading")
+        self.loader = self.loader or NativeModelLoader()
+        try:
+            self.pipeline = self.loader.load(
+                config.registered_model,
+                device_policy=manager.staging_policy(),
+                strict=config.strict_loading,
+            )
+        except BaseException:
+            manager.cleanup_after_failure("model_loading")
+            raise
+        self.device_manager = manager
         self.config = config
         return LoadedPipeline(
             backend_id=self.backend_id,
@@ -160,6 +174,8 @@ class NativeK2Backend:
                 "model_name": self.pipeline.model_name,
                 "strict_loading": config.strict_loading,
                 "components": tuple(report.to_payload() for report in self.pipeline.reports()),
+                "device_plan": manager.plan.to_payload(),
+                "memory": initial_memory,
             },
         )
 
@@ -189,6 +205,9 @@ class NativeK2Backend:
         try:
             self._validate_clean_request(request)
             pipeline, config = self._require_loaded()
+            manager = self._require_device_manager()
+            manager.preflight("generation")
+            manager.reset_peak_stats()
             registered_model = config.registered_model
             if registered_model is None or registered_model.tokenizer is None:
                 raise ConfigurationError(
@@ -229,7 +248,7 @@ class NativeK2Backend:
                 gpu_work_started = True
                 encoding = text_encoder.encode(
                     conditioned_prompt,
-                    device=config.device_policy.text_encoder_device,
+                    device=manager.plan.text_encoder_device,
                 )
                 bound_regional_plan = (
                     regional_plan.bind_tokens(
@@ -284,7 +303,7 @@ class NativeK2Backend:
             torch = _import_torch()
             execution_device = _execution_device(
                 torch,
-                config.device_policy.transformer_device,
+                manager.plan.transformer_device,
             )
             latent = prepare_noise(
                 _clean_latent_shape(request.width, request.height),
@@ -315,7 +334,7 @@ class NativeK2Backend:
                     encoding.conditioning,
                     sigma,
                     attention_mask=encoding.attention_mask,
-                    device=config.device_policy.transformer_device,
+                    device=manager.plan.transformer_device,
                 )
 
             def checkpoint(item: DenoisingCheckpoint) -> None:
@@ -341,6 +360,7 @@ class NativeK2Backend:
                     detail={
                         "sigma": item.sigma,
                         "sigma_next": item.sigma_next,
+                        "memory": manager.snapshot(f"denoising step {completed}/{request.steps}"),
                     },
                 )
 
@@ -365,11 +385,14 @@ class NativeK2Backend:
             token.raise_if_cancelled()
 
             emit("vae_decode", fraction=0.0)
-            vae = build_krea2_vae(pipeline.vae)
+            vae = build_krea2_vae(
+                pipeline.vae,
+                tiling=manager.plan.vae_tiling,
+            )
             try:
                 images = vae.decode(
                     latent,
-                    device=config.device_policy.vae_device,
+                    device=manager.plan.vae_device,
                 )
             finally:
                 vae.unload()
@@ -401,6 +424,7 @@ class NativeK2Backend:
                     else None
                 ),
             )
+            payload["memory"] = manager.snapshot("generation complete")
             if diagnostic is not None:
                 diagnostic(
                     "Native clean generation complete",
@@ -417,6 +441,8 @@ class NativeK2Backend:
                 payload=payload,
             )
         except Exception as error:
+            if self.device_manager is not None:
+                self._cleanup_after_failure("generation")
             structured = convert_error(
                 error,
                 backend_name=self.backend_id,
@@ -443,6 +469,9 @@ class NativeK2Backend:
         try:
             self._validate_edit_request(request)
             pipeline, config = self._require_loaded()
+            manager = self._require_device_manager()
+            manager.preflight("image_edit")
+            manager.reset_peak_stats()
             registered_model = config.registered_model
             if registered_model is None or registered_model.tokenizer is None:
                 raise ConfigurationError(
@@ -531,6 +560,7 @@ class NativeK2Backend:
                         else {"backend": "disabled", "region_count": 0}
                     ),
                 )
+                payload["memory"] = manager.snapshot("zero-strength image editing complete")
                 return GenerationResult(
                     backend_id=self.backend_id,
                     correlation_id=request.correlation_id,
@@ -545,7 +575,7 @@ class NativeK2Backend:
             try:
                 encoding = text_encoder.encode(
                     conditioned_prompt,
-                    device=config.device_policy.text_encoder_device,
+                    device=manager.plan.text_encoder_device,
                 )
                 bound_regional_plan = (
                     regional_plan.bind_tokens(
@@ -603,11 +633,14 @@ class NativeK2Backend:
             )
             emit("image_encode", fraction=0.0)
             gpu_work_started = True
-            vae = build_krea2_vae(pipeline.vae)
+            vae = build_krea2_vae(
+                pipeline.vae,
+                tiling=manager.plan.vae_tiling,
+            )
             try:
                 source_latent = vae.encode(
                     pixels,
-                    device=config.device_policy.vae_device,
+                    device=manager.plan.vae_device,
                 ).float()
             finally:
                 vae.unload()
@@ -616,7 +649,7 @@ class NativeK2Backend:
 
             execution_device = _execution_device(
                 torch,
-                config.device_policy.transformer_device,
+                manager.plan.transformer_device,
             )
             source_latent = source_latent.to(execution_device)
             noise = prepare_noise(
@@ -699,7 +732,7 @@ class NativeK2Backend:
                     encoding.conditioning,
                     sigma,
                     attention_mask=encoding.attention_mask,
-                    device=config.device_policy.transformer_device,
+                    device=manager.plan.transformer_device,
                 )
 
             def checkpoint(item: DenoisingCheckpoint) -> None:
@@ -731,6 +764,9 @@ class NativeK2Backend:
                     detail={
                         "sigma": item.sigma,
                         "sigma_next": item.sigma_next,
+                        "memory": manager.snapshot(
+                            f"image-edit step {completed}/{len(sigmas) - 1}"
+                        ),
                     },
                 )
 
@@ -768,11 +804,14 @@ class NativeK2Backend:
             token.raise_if_cancelled()
 
             emit("vae_decode", fraction=0.0)
-            vae = build_krea2_vae(pipeline.vae)
+            vae = build_krea2_vae(
+                pipeline.vae,
+                tiling=manager.plan.vae_tiling,
+            )
             try:
                 images = vae.decode(
                     latent,
-                    device=config.device_policy.vae_device,
+                    device=manager.plan.vae_device,
                 )
             finally:
                 vae.unload()
@@ -803,6 +842,7 @@ class NativeK2Backend:
                 lora_reports=lora_reports,
                 regional_summary=regional_summary,
             )
+            payload["memory"] = manager.snapshot("image editing complete")
             if diagnostic is not None:
                 diagnostic(
                     "Native image editing complete",
@@ -819,6 +859,8 @@ class NativeK2Backend:
                 payload=payload,
             )
         except Exception as error:
+            if self.device_manager is not None:
+                self._cleanup_after_failure("image_edit")
             structured = convert_error(
                 error,
                 backend_name=self.backend_id,
@@ -837,12 +879,16 @@ class NativeK2Backend:
         )
 
     def decode_latents(self, request: LatentDecodeRequest) -> ImageResult:
-        pipeline, config = self._require_loaded()
-        vae = build_krea2_vae(pipeline.vae)
+        pipeline, _config = self._require_loaded()
+        manager = self._require_device_manager()
+        vae = build_krea2_vae(
+            pipeline.vae,
+            tiling=manager.plan.vae_tiling,
+        )
         try:
             images = vae.decode(
                 request.latents,
-                device=config.device_policy.vae_device,
+                device=manager.plan.vae_device,
             )
         finally:
             vae.unload()
@@ -854,10 +900,17 @@ class NativeK2Backend:
         )
 
     def unload(self) -> None:
-        if self.pipeline is not None:
-            (self.loader or NativeModelLoader()).unload(self.pipeline)
-            self.pipeline = None
+        pipeline = self.pipeline
+        manager = self.device_manager
+        self.pipeline = None
+        self.device_manager = None
         self.config = None
+        try:
+            if pipeline is not None:
+                (self.loader or NativeModelLoader()).unload(pipeline)
+        finally:
+            if manager is not None:
+                manager.release()
 
     def _require_loaded(self) -> tuple[NativePipelineState, PipelineConfig]:
         if self.pipeline is None or self.config is None or not self.pipeline.loaded:
@@ -868,6 +921,25 @@ class NativeK2Backend:
                 remediation="Load a validated registered model before retrying.",
             )
         return self.pipeline, self.config
+
+    def _require_device_manager(self) -> NativeDeviceManager:
+        if self.device_manager is None:
+            raise ConfigurationError(
+                "The native K2 device manager must be initialized before inference.",
+                backend_name=self.backend_id,
+                phase="device_planning",
+                remediation="Reload the validated native pipeline before retrying.",
+            )
+        return self.device_manager
+
+    def _cleanup_after_failure(self, phase: str) -> None:
+        if self.device_manager is None:
+            return
+        try:
+            self.device_manager.cleanup_after_failure(phase)
+        except Exception:
+            # Cleanup telemetry must never replace the inference error that triggered it.
+            pass
 
     def _validate_clean_request(self, request: GenerationRequest) -> None:
         if not request.prompt.strip():

@@ -304,18 +304,36 @@ class NativeLoadingTests(unittest.TestCase):
             loader = unittest.mock.Mock()
             loader.load.return_value = pipeline
             backend.loader = loader
-
-            result = backend.load(
-                PipelineConfig(
-                    artifacts=artifacts,
-                    registered_model=model,
-                )
+            manager = unittest.mock.Mock()
+            manager.preflight.return_value = {"stage": "model_loading"}
+            manager.staging_policy.return_value = DevicePolicy(
+                transformer_device="cpu",
+                text_encoder_device="cpu",
+                vae_device="cpu",
             )
+            manager.plan.to_payload.return_value = {"accelerator_backend": "fixture"}
+
+            with patch(
+                "k2core.backends.native.NativeDeviceManager",
+                return_value=manager,
+            ):
+                result = backend.load(
+                    PipelineConfig(
+                        artifacts=artifacts,
+                        registered_model=model,
+                    )
+                )
 
             self.assertEqual(result.backend_id, "native")
-            loader.load.assert_called_once()
+            self.assertEqual(result.metadata["device_plan"]["accelerator_backend"], "fixture")
+            loader.load.assert_called_once_with(
+                model,
+                device_policy=manager.staging_policy.return_value,
+                strict=True,
+            )
             backend.unload()
             loader.unload.assert_called_once_with(pipeline)
+            manager.release.assert_called_once_with()
 
 
 if __name__ == "__main__":

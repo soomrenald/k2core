@@ -128,7 +128,11 @@ class NativeKrea2VAE:
             torch.cuda.empty_cache()
 
 
-def build_krea2_vae(component: NativeComponent) -> NativeKrea2VAE:
+def build_krea2_vae(
+    component: NativeComponent,
+    *,
+    tiling: bool = False,
+) -> NativeKrea2VAE:
     """Map the exact reviewed VAE checkpoint onto Diffusers' upstream graph."""
 
     if component.config.role != ArtifactKind.VAE:
@@ -182,6 +186,16 @@ def build_krea2_vae(component: NativeComponent) -> NativeKrea2VAE:
         )
     model.requires_grad_(False)
     model.eval()
+    if tiling:
+        enable_tiling = getattr(model, "enable_tiling", None)
+        if not callable(enable_tiling):
+            raise ConfigurationError(
+                "This Qwen Image VAE runtime does not support tiling.",
+                backend_name="native",
+                phase="vae",
+                remediation="Disable VAE tiling or install a supported Diffusers build.",
+            )
+        enable_tiling()
     return NativeKrea2VAE(
         model=model,
         report=Krea2VAELoadReport(

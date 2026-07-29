@@ -149,17 +149,20 @@ class NativeDeviceManager:
         }
         if not self._accelerator_available:
             return payload
-        free, total = self.torch.cuda.mem_get_info()
-        payload.update(
-            {
-                "gpu_free_bytes": int(free),
-                "gpu_total_bytes": int(total),
-                "gpu_allocated_bytes": int(self.torch.cuda.memory_allocated()),
-                "gpu_reserved_bytes": int(self.torch.cuda.memory_reserved()),
-                "gpu_peak_allocated_bytes": int(self.torch.cuda.max_memory_allocated()),
-                "gpu_peak_reserved_bytes": int(self.torch.cuda.max_memory_reserved()),
-            }
-        )
+        try:
+            free, total = self.torch.cuda.mem_get_info()
+            payload.update(
+                {
+                    "gpu_free_bytes": int(free),
+                    "gpu_total_bytes": int(total),
+                    "gpu_allocated_bytes": int(self.torch.cuda.memory_allocated()),
+                    "gpu_reserved_bytes": int(self.torch.cuda.memory_reserved()),
+                    "gpu_peak_allocated_bytes": int(self.torch.cuda.max_memory_allocated()),
+                    "gpu_peak_reserved_bytes": int(self.torch.cuda.max_memory_reserved()),
+                }
+            )
+        except (RuntimeError, TypeError, ValueError) as error:
+            payload["telemetry_error"] = f"{type(error).__name__}: {error}"
         return payload
 
     def reset_peak_stats(self) -> None:

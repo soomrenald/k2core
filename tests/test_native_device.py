@@ -47,6 +47,14 @@ class FakeCuda:
         self.empty_cache_calls += 1
 
 
+class FakeCore:
+    def __init__(self) -> None:
+        self.clear_workspace_calls = 0
+
+    def _cuda_clearCublasWorkspaces(self) -> None:
+        self.clear_workspace_calls += 1
+
+
 class FakeTorch:
     bfloat16 = "bfloat16"
     float16 = "float16"
@@ -56,6 +64,7 @@ class FakeTorch:
 
     def __init__(self, *, available: bool = True) -> None:
         self.cuda = FakeCuda(available=available)
+        self._C = FakeCore()
 
     @staticmethod
     def device(name: str) -> str:
@@ -159,6 +168,7 @@ class NativeDeviceManagerTests(unittest.TestCase):
 
         self.assertEqual(torch.cuda.reset_calls, 1)
         self.assertEqual(torch.cuda.empty_cache_calls, 1)
+        self.assertEqual(torch._C.clear_workspace_calls, 1)
         self.assertEqual(cleanup["failed_phase"], "transformer")
         self.assertTrue(manager.is_oom(RuntimeError("HIP out of memory")))
         self.assertFalse(manager.is_oom(RuntimeError("shape mismatch")))

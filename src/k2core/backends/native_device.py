@@ -198,6 +198,10 @@ class NativeDeviceManager:
     def release(self) -> dict[str, Any]:
         gc.collect()
         if self._accelerator_available:
+            core = getattr(self.torch, "_C", None)
+            clear_workspaces = getattr(core, "_cuda_clearCublasWorkspaces", None)
+            if callable(clear_workspaces):
+                clear_workspaces()
             self.torch.cuda.empty_cache()
         return self.snapshot("native cleanup complete")
 

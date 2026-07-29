@@ -8,7 +8,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from k2core.model import ArtifactSet
+from k2core.model import ArtifactSet, RegisteredModel
 from k2core.projector import DEFAULT_PROJECTOR_PRESET
 from k2core.regional_prompting import (
     PromptEmphasis,
@@ -50,9 +50,10 @@ class DevicePolicy:
 
 @dataclass(frozen=True, slots=True)
 class PipelineConfig:
-    """Lifecycle settings consumed by the reference ComfyUI adapter."""
+    """Lifecycle settings consumed by either inference backend."""
 
     artifacts: ArtifactSet
+    registered_model: RegisteredModel | None = None
     memory_policy: str = "safe_16gb"
     reserve_vram_gb: float = 4.0
     minimum_system_ram_gb: float = 14.0

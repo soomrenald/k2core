@@ -132,5 +132,21 @@ __all__ = [
 from k2core.backends.comfy_krea import ComfyKreaBackend  # noqa: E402
 from k2core.backends.comfyui import ComfyUIBackend  # noqa: E402
 from k2core.backends.native import NativeK2Backend  # noqa: E402
+from k2core.backends.native_loading import (  # noqa: E402
+    ComponentLoadReport,
+    NativeComponent,
+    NativeComponentConfig,
+    NativeModelLoader,
+    NativePipelineState,
+)
 
-__all__ += ["ComfyKreaBackend", "ComfyUIBackend", "NativeK2Backend"]
+__all__ += [
+    "ComfyKreaBackend",
+    "ComfyUIBackend",
+    "ComponentLoadReport",
+    "NativeComponent",
+    "NativeComponentConfig",
+    "NativeK2Backend",
+    "NativeModelLoader",
+    "NativePipelineState",
+]

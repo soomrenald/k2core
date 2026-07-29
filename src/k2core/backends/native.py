@@ -14,7 +14,9 @@ from k2core.backends.native_lora import apply_native_loras
 from k2core.backends.native_qwen import build_qwen_text_encoder
 from k2core.backends.native_sampling import (
     DenoisingCheckpoint,
+    euler_flow_image_sample,
     euler_flow_sample,
+    partial_denoise_sigmas,
     prepare_noise,
     simple_sigmas,
 )
@@ -36,14 +38,25 @@ from k2core.inference.errors import (
 from k2core.inference.schemas import (
     GenerationRequest,
     GenerationResult,
+    ImageEditRequest,
     ImageEncodeRequest,
     ImageResult,
     InferenceRequest,
+    InstrumentationConfig,
     LatentDecodeRequest,
     LatentResult,
     LoadedPipeline,
     PipelineConfig,
     ProgressEvent,
+)
+from k2core.image_edit import (
+    composite_regional_edit,
+    edge_pad_to_krea,
+    edit_global_conditioning_prompt,
+    load_source_image,
+    regional_composite_mask,
+    regional_edit_conditioning,
+    regional_reference_emphases,
 )
 from k2core.output import validate_filename_prefix
 from k2core.regional_lora import (
@@ -71,6 +84,7 @@ class NativeK2Backend:
             modes=frozenset(
                 {
                     "text_to_image",
+                    "image_edit",
                     "ordinary_lora",
                     "regional_prompting",
                     "regional_lora",
@@ -157,6 +171,13 @@ class NativeK2Backend:
         cancellation: CancellationToken | None = None,
         diagnostic: DiagnosticCallback | None = None,
     ) -> GenerationResult:
+        if isinstance(request, ImageEditRequest):
+            return self._edit_image(
+                request,
+                progress=progress,
+                cancellation=cancellation,
+                diagnostic=diagnostic,
+            )
         if not isinstance(request, GenerationRequest):
             return self._unsupported(
                 "generation",
@@ -407,6 +428,408 @@ class NativeK2Backend:
                 raise
             raise structured from error
 
+    def _edit_image(
+        self,
+        request: ImageEditRequest,
+        *,
+        progress: ProgressCallback | None,
+        cancellation: CancellationToken | None,
+        diagnostic: DiagnosticCallback | None,
+    ) -> GenerationResult:
+        token = cancellation or NullCancellationToken()
+        token.raise_if_cancelled()
+        emit = _progress_emitter(request.correlation_id, progress)
+        gpu_work_started = False
+        try:
+            self._validate_edit_request(request)
+            pipeline, config = self._require_loaded()
+            registered_model = config.registered_model
+            if registered_model is None or registered_model.tokenizer is None:
+                raise ConfigurationError(
+                    "Native image editing requires a registered tokenizer.",
+                    backend_name=self.backend_id,
+                    phase="text_encoding",
+                    correlation_id=request.correlation_id,
+                    remediation="Rescan and validate the Krea2 model registry.",
+                )
+
+            source_path = request.image_path.expanduser().resolve()
+            source_image, source_metadata = load_source_image(source_path)
+            padded_source, geometry = edge_pad_to_krea(source_image)
+            target_regions = tuple(region for region in request.regions if region.enabled)
+            filtered_loras = tuple(
+                item
+                for item in request.loras
+                if request.preserve_identity
+                or not (
+                    item.lora_id.startswith("reference:")
+                    and item.routing_mode == "character_identity"
+                )
+            )
+            conditioning_regions = regional_edit_conditioning(
+                request.reference_regions,
+                target_regions,
+                request.prompt,
+                preserve_identity=request.preserve_identity,
+            )
+            active_edit_regions = tuple(
+                region for region in conditioning_regions if region.spatial_role == "edit"
+            )
+            if not request.edit_entire_image and not target_regions:
+                raise ValueError("regional image editing requires an edit box or Edit entire image")
+            if not request.prompt.strip() and not active_edit_regions:
+                raise ValueError(
+                    "a blank image-edit global prompt requires at least one active regional prompt"
+                )
+            conditioned_global_prompt = edit_global_conditioning_prompt(
+                request.reference_prompt,
+                request.prompt,
+                edit_entire_image=request.edit_entire_image,
+            )
+            regional_plan = (
+                compile_regional_prompt_plan(
+                    source_image.width,
+                    source_image.height,
+                    conditioned_global_prompt,
+                    conditioning_regions,
+                    strength=request.regional_prompt_strength,
+                    outside_penalty=request.regional_outside_penalty,
+                    falloff_pixels=request.regional_feather_pixels,
+                    subject_competition=request.regional_subject_competition,
+                    subject_fill=request.regional_subject_fill,
+                    late_step_scale=request.regional_late_step_scale,
+                    emphases=regional_reference_emphases(request.prompt_emphases),
+                    character_identity_triggers=character_identity_triggers(
+                        [item.to_payload() for item in filtered_loras]
+                    ),
+                )
+                if conditioning_regions
+                else None
+            )
+            conditioned_prompt = (
+                regional_plan.prompt
+                if regional_plan is not None and regional_plan.regions
+                else conditioned_global_prompt
+            )
+            if not conditioned_prompt:
+                raise ValueError("image editing requires prompt text")
+
+            if request.denoise == 0.0:
+                payload = _save_native_edit(
+                    request,
+                    source_path=source_path,
+                    source_image=source_image,
+                    source_metadata=source_metadata,
+                    candidate=source_image.copy(),
+                    geometry=geometry,
+                    conditioned_prompt=conditioned_prompt,
+                    target_regions=target_regions,
+                    lora_reports=(),
+                    regional_summary=(
+                        regional_plan.summary()
+                        if regional_plan is not None
+                        else {"backend": "disabled", "region_count": 0}
+                    ),
+                )
+                return GenerationResult(
+                    backend_id=self.backend_id,
+                    correlation_id=request.correlation_id,
+                    payload=payload,
+                )
+
+            emit("text_encoding", fraction=0.0)
+            text_encoder = build_qwen_text_encoder(
+                pipeline.text_encoder,
+                registered_model.tokenizer,
+            )
+            try:
+                encoding = text_encoder.encode(
+                    conditioned_prompt,
+                    device=config.device_policy.text_encoder_device,
+                )
+                bound_regional_plan = (
+                    regional_plan.bind_tokens(
+                        lambda prefix: prompt_token_count(
+                            prefix,
+                            text_encoder.tokenizer,
+                        ),
+                        conditioning_text_token_count=len(encoding.tokens.conditioned_ids),
+                    )
+                    if regional_plan is not None
+                    and (regional_plan.regions or regional_plan.emphases)
+                    else None
+                )
+            finally:
+                text_encoder.unload()
+            if diagnostic is not None and bound_regional_plan is not None:
+                diagnostic(
+                    "Unified spatial edit prompt prepared",
+                    bound_regional_plan.summary(),
+                )
+            lora_routes = (
+                compile_lora_delta_routes(
+                    [item.to_payload() for item in filtered_loras],
+                    width=geometry.aligned_width,
+                    height=geometry.aligned_height,
+                    text_token_count=len(encoding.tokens.conditioned_ids),
+                    regional_plan=regional_plan,
+                    bound_plan=bound_regional_plan,
+                )
+                if filtered_loras
+                else ()
+            )
+            emit(
+                "text_encoding",
+                fraction=1.0,
+                detail={"token_count": len(encoding.tokens.conditioned_ids)},
+            )
+            token.raise_if_cancelled()
+
+            torch = _import_torch()
+            try:
+                import numpy as np
+            except ImportError as error:
+                raise ConfigurationError(
+                    "Native image editing requires NumPy.",
+                    technical_detail=str(error),
+                    backend_name=self.backend_id,
+                    phase="image_encode",
+                ) from error
+            pixels = (
+                torch.from_numpy(np.asarray(padded_source, dtype=np.float32).copy())
+                .permute(2, 0, 1)
+                .unsqueeze(0)
+                / 255.0
+            )
+            emit("image_encode", fraction=0.0)
+            gpu_work_started = True
+            vae = build_krea2_vae(pipeline.vae)
+            try:
+                source_latent = vae.encode(
+                    pixels,
+                    device=config.device_policy.vae_device,
+                ).float()
+            finally:
+                vae.unload()
+            emit("image_encode", fraction=1.0)
+            token.raise_if_cancelled()
+
+            execution_device = _execution_device(
+                torch,
+                config.device_policy.transformer_device,
+            )
+            source_latent = source_latent.to(execution_device)
+            noise = prepare_noise(
+                tuple(source_latent.shape),
+                request.seed,
+                device="cpu",
+                dtype=torch.float32,
+            ).to(execution_device)
+            sigmas = partial_denoise_sigmas(request.steps, request.denoise)
+            if request.edit_entire_image:
+                denoise_mask = torch.ones(
+                    (
+                        1,
+                        1,
+                        source_latent.shape[-3],
+                        source_latent.shape[-2],
+                        source_latent.shape[-1],
+                    ),
+                    device=execution_device,
+                    dtype=torch.float32,
+                )
+            else:
+                pixel_mask = regional_composite_mask(
+                    padded_source.size,
+                    target_regions,
+                    request.latent_feather_pixels,
+                )
+                denoise_mask = torch.from_numpy(
+                    np.asarray(pixel_mask, dtype=np.float32).copy() / 255.0
+                ).view(
+                    1,
+                    1,
+                    1,
+                    padded_source.height,
+                    padded_source.width,
+                )
+                denoise_mask = torch.nn.functional.interpolate(
+                    denoise_mask,
+                    size=source_latent.shape[-3:],
+                    mode="trilinear",
+                ).to(device=execution_device)
+
+            attention_override = (
+                KreaSpatialAttentionOverride(
+                    bound_regional_plan,
+                    lora_delta_adaptation=(request.regional_lora_delta_adaptation),
+                    lora_delta_adaptation_gain=(request.regional_lora_delta_adaptation_gain),
+                )
+                if bound_regional_plan is not None
+                and (bound_regional_plan.spans or bound_regional_plan.emphases)
+                else None
+            )
+            if attention_override is not None:
+                reference_ids = {region.region_id for region in request.reference_regions}
+                attention_override.region_scales.update(
+                    {
+                        region_id: request.reference_description_retention
+                        for region_id in reference_ids
+                    }
+                )
+            instrumentation = (
+                NativeInstrumentation(
+                    InstrumentationConfig(),
+                    adaptation_routes=(
+                        tuple(lora_routes) if request.regional_lora_delta_adaptation else ()
+                    ),
+                )
+                if request.regional_lora_delta_adaptation
+                else None
+            )
+            transformer = build_krea2_transformer(
+                pipeline.transformer,
+                spatial_attention=attention_override,
+            )
+
+            def predict(current, sigma):
+                token.raise_if_cancelled()
+                return transformer.predict_velocity(
+                    current,
+                    encoding.conditioning,
+                    sigma,
+                    attention_mask=encoding.attention_mask,
+                    device=config.device_policy.transformer_device,
+                )
+
+            def checkpoint(item: DenoisingCheckpoint) -> None:
+                token.raise_if_cancelled()
+                completed = item.step + 1
+                if attention_override is not None:
+                    attention_override.set_denoising_progress(
+                        completed,
+                        len(sigmas) - 1,
+                    )
+                    if request.regional_lora_delta_adaptation and instrumentation is not None:
+                        attention_override.set_lora_delta_scales(
+                            instrumentation.regional_attention_scales(
+                                request.regional_lora_delta_adaptation_gain
+                            )
+                        )
+                        attention_override.region_scales.update(
+                            {
+                                region.region_id: (request.reference_description_retention)
+                                for region in request.reference_regions
+                            }
+                        )
+                        instrumentation.reset_step_measurements()
+                emit(
+                    "diffusion",
+                    step=completed,
+                    total_steps=len(sigmas) - 1,
+                    fraction=completed / (len(sigmas) - 1),
+                    detail={
+                        "sigma": item.sigma,
+                        "sigma_next": item.sigma_next,
+                    },
+                )
+
+            try:
+                lora_reports = apply_native_loras(
+                    transformer,
+                    filtered_loras,
+                    routes=lora_routes,
+                    instrumentation=instrumentation,
+                )
+                latent = euler_flow_image_sample(
+                    predict,
+                    source_latent,
+                    noise,
+                    sigmas,
+                    denoise_mask,
+                    checkpoint=checkpoint,
+                )
+            finally:
+                if attention_override is not None:
+                    attention_override.clear()
+                transformer.unload()
+            if attention_override is not None:
+                if attention_override.matched_calls == 0:
+                    raise RuntimeError(
+                        "Krea main-stream attention was not reached by the native edit "
+                        "spatial override"
+                    )
+                if attention_override.text_refiner_calls == 0:
+                    raise RuntimeError(
+                        "Krea text-refiner attention was not reached by the native edit "
+                        "text partition"
+                    )
+            encoding = None
+            token.raise_if_cancelled()
+
+            emit("vae_decode", fraction=0.0)
+            vae = build_krea2_vae(pipeline.vae)
+            try:
+                images = vae.decode(
+                    latent,
+                    device=config.device_policy.vae_device,
+                )
+            finally:
+                vae.unload()
+            emit("vae_decode", fraction=1.0)
+            candidate = _native_pil_image(images).crop(
+                (0, 0, source_image.width, source_image.height)
+            )
+            regional_summary = (
+                _native_regional_summary(
+                    regional_plan,
+                    bound_regional_plan,
+                    attention_override,
+                )
+                if regional_plan is not None
+                and bound_regional_plan is not None
+                and attention_override is not None
+                else {"backend": "disabled", "region_count": 0}
+            )
+            payload = _save_native_edit(
+                request,
+                source_path=source_path,
+                source_image=source_image,
+                source_metadata=source_metadata,
+                candidate=candidate,
+                geometry=geometry,
+                conditioned_prompt=conditioned_prompt,
+                target_regions=target_regions,
+                lora_reports=lora_reports,
+                regional_summary=regional_summary,
+            )
+            if diagnostic is not None:
+                diagnostic(
+                    "Native image editing complete",
+                    {
+                        "correlation_id": request.correlation_id,
+                        "image_path": payload["image_path"],
+                        "width": payload["width"],
+                        "height": payload["height"],
+                    },
+                )
+            return GenerationResult(
+                backend_id=self.backend_id,
+                correlation_id=request.correlation_id,
+                payload=payload,
+            )
+        except Exception as error:
+            structured = convert_error(
+                error,
+                backend_name=self.backend_id,
+                phase="image_edit",
+                correlation_id=request.correlation_id,
+                gpu_work_started=gpu_work_started,
+            )
+            if structured is error:
+                raise
+            raise structured from error
+
     def encode_image(self, request: ImageEncodeRequest) -> LatentResult:
         return self._unsupported(
             "image_encode",
@@ -481,6 +904,38 @@ class NativeK2Backend:
                 phase="generation",
                 correlation_id=request.correlation_id,
                 remediation="Use the ComfyUI backend for this request.",
+            )
+
+    def _validate_edit_request(self, request: ImageEditRequest) -> None:
+        if request.sampler != "euler":
+            raise UnsupportedFeatureError(
+                "Native image editing currently supports only the Euler sampler.",
+                backend_name=self.backend_id,
+                phase="image_edit",
+                correlation_id=request.correlation_id,
+                remediation="Choose Euler or use the ComfyUI backend.",
+            )
+        if request.scheduler != "simple":
+            raise UnsupportedFeatureError(
+                "Native image editing currently supports only the simple scheduler.",
+                backend_name=self.backend_id,
+                phase="image_edit",
+                correlation_id=request.correlation_id,
+                remediation="Choose the simple scheduler or use the ComfyUI backend.",
+            )
+        if not 0 <= request.latent_feather_pixels <= 256:
+            raise ValueError("image-edit latent feather must be between 0 and 256 pixels")
+        if not 0 <= request.composite_feather_pixels <= 256:
+            raise ValueError("image-edit composite feather must be between 0 and 256 pixels")
+        if not 0.0 <= request.reference_description_retention <= 1.0:
+            raise ValueError("reference description retention must be between zero and one")
+        if request.projector_enabled:
+            raise UnsupportedFeatureError(
+                "Native image editing does not yet support projector controls.",
+                backend_name=self.backend_id,
+                phase="image_edit",
+                correlation_id=request.correlation_id,
+                remediation="Disable projector controls or use the ComfyUI backend.",
             )
 
 
@@ -587,16 +1042,9 @@ def _progress_emitter(
     return emit
 
 
-def _save_native_image(
-    request: GenerationRequest,
-    images: Any,
-    lora_reports: Sequence[Any] = (),
-    *,
-    regional_summary: dict[str, Any] | None = None,
-    instrumentation_summary: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+def _native_pil_image(images: Any):
     try:
-        from PIL import Image, PngImagePlugin
+        from PIL import Image
     except ImportError as error:
         raise ConfigurationError(
             "Native image output requires Pillow.",
@@ -604,7 +1052,6 @@ def _save_native_image(
             backend_name="native",
             phase="image_output",
         ) from error
-
     if images.ndim != 4 or images.shape[0] != 1 or images.shape[1] != 3:
         raise RuntimeError(f"native VAE returned an unexpected image shape: {tuple(images.shape)}")
     array = (
@@ -620,7 +1067,151 @@ def _save_native_image(
         .round()
         .astype("uint8")
     )
-    image = Image.fromarray(array, mode="RGB")
+    return Image.fromarray(array)
+
+
+def _save_native_edit(
+    request: ImageEditRequest,
+    *,
+    source_path: Any,
+    source_image: Any,
+    source_metadata: dict[str, str],
+    candidate: Any,
+    geometry: Any,
+    conditioned_prompt: str,
+    target_regions: Sequence[Any],
+    lora_reports: Sequence[Any],
+    regional_summary: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        from PIL import PngImagePlugin
+    except ImportError as error:
+        raise ConfigurationError(
+            "Native image output requires Pillow.",
+            technical_detail=str(error),
+            backend_name="native",
+            phase="image_output",
+        ) from error
+
+    preserve_outside = not request.edit_entire_image
+    effective_feather = min(
+        request.composite_feather_pixels,
+        request.latent_feather_pixels,
+    )
+    if preserve_outside:
+        output_image, mask = composite_regional_edit(
+            source_image,
+            candidate,
+            tuple(target_regions),
+            effective_feather,
+        )
+        changed_bounds = mask.getbbox()
+    else:
+        output_image = candidate.convert("RGB")
+        changed_bounds = (0, 0, source_image.width, source_image.height)
+
+    output_directory = (request.output_directory or source_path.parent).expanduser().resolve()
+    output_directory.mkdir(parents=True, exist_ok=True)
+    prefix = validate_filename_prefix(f"{source_path.stem}_edited")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    output_path = output_directory / f"{prefix}_{stamp}_seed-{request.seed}.png"
+    lora_payloads = [report.to_payload() for report in lora_reports]
+    edit_summary = {
+        "source_image": str(source_path),
+        "original_size": [source_image.width, source_image.height],
+        "aligned_size": [geometry.aligned_width, geometry.aligned_height],
+        "seed": request.seed,
+        "steps": request.steps,
+        "sampler": request.sampler,
+        "scheduler": request.scheduler,
+        "denoise": request.denoise,
+        "latent_feather_pixels": request.latent_feather_pixels,
+        "preserve_outside_regions": preserve_outside,
+        "composite_feather_pixels": request.composite_feather_pixels,
+        "effective_composite_feather_pixels": effective_feather,
+        "edit_entire_image": request.edit_entire_image,
+        "preserve_identity": request.preserve_identity,
+        "reference_description_retention": (request.reference_description_retention),
+        "reference_global_conditioning_applied": False,
+        "composite_bounds": list(changed_bounds) if changed_bounds else None,
+        "regional_prompting": regional_summary,
+        "projector": {"enabled": False, "backend": "disabled"},
+        "loras": lora_payloads,
+    }
+    metadata = PngImagePlugin.PngInfo()
+    replaced_metadata = {
+        "k2lab_mode",
+        "backend",
+        "correlation_id",
+        "source_image",
+        "prompt",
+        "global_prompt",
+        "image_edit",
+        "regional_prompting",
+        "loras",
+    }
+    if request.project_json:
+        replaced_metadata.add("k2lab_project")
+    for key, value in source_metadata.items():
+        if key not in replaced_metadata:
+            metadata.add_text(key, value)
+    metadata.add_text("k2lab_mode", "krea2_regional_image_edit_native")
+    metadata.add_text("backend", "native")
+    metadata.add_text("correlation_id", request.correlation_id)
+    metadata.add_text("source_image", str(source_path))
+    metadata.add_text("prompt", conditioned_prompt)
+    metadata.add_text("global_prompt", request.prompt)
+    metadata.add_text(
+        "image_edit",
+        json.dumps(edit_summary, separators=(",", ":")),
+    )
+    metadata.add_text(
+        "regional_prompting",
+        json.dumps(regional_summary, separators=(",", ":")),
+    )
+    metadata.add_text(
+        "loras",
+        json.dumps(lora_payloads, separators=(",", ":")),
+    )
+    if request.project_json:
+        metadata.add_text(
+            "k2lab_project",
+            json.dumps(dict(request.project_json), separators=(",", ":")),
+        )
+    output_image.save(output_path, pnginfo=metadata)
+    return {
+        "image_path": str(output_path),
+        "source_image": str(source_path),
+        "width": output_image.width,
+        "height": output_image.height,
+        "seed": request.seed,
+        "backend": "native",
+        "correlation_id": request.correlation_id,
+        "image_edit": edit_summary,
+        "regional_prompting": regional_summary,
+        "loras": lora_payloads,
+    }
+
+
+def _save_native_image(
+    request: GenerationRequest,
+    images: Any,
+    lora_reports: Sequence[Any] = (),
+    *,
+    regional_summary: dict[str, Any] | None = None,
+    instrumentation_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    try:
+        from PIL import PngImagePlugin
+    except ImportError as error:
+        raise ConfigurationError(
+            "Native image output requires Pillow.",
+            technical_detail=str(error),
+            backend_name="native",
+            phase="image_output",
+        ) from error
+
+    image = _native_pil_image(images)
     output_directory = request.output_directory.expanduser().resolve()
     output_directory.mkdir(parents=True, exist_ok=True)
     prefix = validate_filename_prefix(request.filename_prefix)

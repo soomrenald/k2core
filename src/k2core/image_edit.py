@@ -31,9 +31,7 @@ class ImageEditState:
     reference_prompt_emphases: tuple[PromptEmphasis, ...] = ()
     reference_projector_enabled: bool = False
     reference_projector_preset: str = DEFAULT_PROJECTOR_PRESET
-    reference_projector_values: tuple[float, ...] = PROJECTOR_PRESETS[
-        DEFAULT_PROJECTOR_PRESET
-    ]
+    reference_projector_values: tuple[float, ...] = PROJECTOR_PRESETS[DEFAULT_PROJECTOR_PRESET]
     reference_projector_multiplier: float = 1.0
     reference_projector_identity_protection: float = 1.0
     global_prompt: str = ""
@@ -59,9 +57,7 @@ class ImageEditState:
 
     def __post_init__(self) -> None:
         has_geometry = self.width != 0 or self.height != 0
-        if has_geometry and not (
-            256 <= self.width <= 4096 and 256 <= self.height <= 4096
-        ):
+        if has_geometry and not (256 <= self.width <= 4096 and 256 <= self.height <= 4096):
             raise ValueError("image-edit dimensions must be between 256 and 4096 pixels")
         if not 1 <= self.steps <= 100:
             raise ValueError("image-edit steps must be between 1 and 100")
@@ -69,8 +65,8 @@ class ImageEditState:
         validate_scheduler(self.scheduler)
         if not 0 <= self.seed <= 2_147_483_647:
             raise ValueError("image-edit seed must be between 0 and 2147483647")
-        if not 0.0 < self.denoise <= 1.0:
-            raise ValueError("image-edit denoise must be in (0, 1]")
+        if not 0.0 <= self.denoise <= 1.0:
+            raise ValueError("image-edit denoise must be between zero and one")
         if not 0 <= self.latent_feather_pixels <= 256:
             raise ValueError("image-edit latent feather must be between 0 and 256 pixels")
         if not 0 <= self.composite_feather_pixels <= 256:
@@ -201,9 +197,7 @@ def regional_edit_conditioning(
     """
 
     references = tuple(
-        region
-        if preserve_identity
-        else replace(region, face_identity_prompt="")
+        region if preserve_identity else replace(region, face_identity_prompt="")
         for region in reference_regions
     )
     edit_instruction = instruction.strip().rstrip(".!? ")
@@ -213,9 +207,7 @@ def regional_edit_conditioning(
             continue
         local_prompt = region.prompt.strip().rstrip(".!? ")
         description = ". ".join(
-            dict.fromkeys(
-                part for part in (edit_instruction, local_prompt) if part
-            )
+            dict.fromkeys(part for part in (edit_instruction, local_prompt) if part)
         )
         if not description and not region.face_identity_prompt.strip():
             continue
@@ -253,11 +245,7 @@ def regional_reference_emphases(
 ) -> tuple[PromptEmphasis, ...]:
     """Keep reference-region emphases after source-global text is omitted."""
 
-    return tuple(
-        emphasis
-        for emphasis in emphases
-        if emphasis.scope_id != GLOBAL_EMPHASIS_SCOPE
-    )
+    return tuple(emphasis for emphasis in emphases if emphasis.scope_id != GLOBAL_EMPHASIS_SCOPE)
 
 
 def composite_regional_edit(
@@ -270,4 +258,3 @@ def composite_regional_edit(
         raise ValueError("source and edited candidate dimensions must match")
     mask = regional_composite_mask(source.size, regions, feather_pixels)
     return Image.composite(candidate.convert("RGB"), source.convert("RGB"), mask), mask
-

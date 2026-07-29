@@ -333,8 +333,8 @@ class ImageEditRequest:
             raise ValueError("correlation_id must not be empty")
         if not 1 <= self.steps <= 100:
             raise ValueError("steps must be between 1 and 100")
-        if not 0.0 < self.denoise <= 1.0:
-            raise ValueError("image-edit denoise must be in (0, 1]")
+        if not 0.0 <= self.denoise <= 1.0:
+            raise ValueError("image-edit denoise must be between zero and one")
         object.__setattr__(self, "project_json", _immutable_mapping(self.project_json))
 
     @classmethod

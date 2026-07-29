@@ -138,7 +138,7 @@ class InferenceContractTests(unittest.TestCase):
                 cfg=2.0,
             )
 
-    def test_native_backend_advertises_regional_prompting_and_loras(
+    def test_native_backend_advertises_regional_prompting_loras_and_editing(
         self,
     ) -> None:
         backend = NativeK2Backend()
@@ -148,6 +148,7 @@ class InferenceContractTests(unittest.TestCase):
             frozenset(
                 {
                     "text_to_image",
+                    "image_edit",
                     "ordinary_lora",
                     "regional_prompting",
                     "regional_lora",

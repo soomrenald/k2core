@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
-from k2core.backends import euler_flow_sample, simple_sigmas, tokenize_prompt
+from k2core.backends import euler_flow_sample, prepare_noise, simple_sigmas, tokenize_prompt
 
 
 class FakeTokenizer:
@@ -38,6 +39,37 @@ class NativeSamplingTests(unittest.TestCase):
         self.assertEqual(result, 1.25)
         self.assertEqual([item.step for item in checkpoints], [0, 1])
         self.assertEqual(checkpoints[0].model_output, 1.0)
+
+    def test_noise_uses_an_explicit_generator_without_global_manual_seed(self) -> None:
+        class Generator:
+            def manual_seed(self, seed):
+                self.seed = seed
+                return self
+
+        class Torch:
+            strided = "strided"
+
+            def __init__(self):
+                self.generator = Generator()
+
+            def Generator(self, *, device):
+                self.generator.device = device
+                return self.generator
+
+            def randn(self, shape, **kwargs):
+                return shape, kwargs
+
+        fake_torch = Torch()
+        with patch.dict("sys.modules", {"torch": fake_torch}):
+            shape, options = prepare_noise(
+                (1, 16, 1, 8, 8),
+                17,
+                device="cpu",
+                dtype="float32",
+            )
+        self.assertEqual(shape, (1, 16, 1, 8, 8))
+        self.assertEqual(fake_torch.generator.seed, 17)
+        self.assertIs(options["generator"], fake_torch.generator)
 
     def test_prompt_template_retains_full_context_and_marks_conditioned_slice(self) -> None:
         tokenizer = FakeTokenizer([151644, 10, 151644, 872, 198, 20, 21])

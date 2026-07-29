@@ -87,7 +87,8 @@ def prepare_noise(shape, seed: int, *, device: str, dtype):
         import torch
     except ImportError as error:
         raise RuntimeError("native noise generation requires PyTorch") from error
-    generator = torch.manual_seed(seed)
+    generator = torch.Generator(device=device)
+    generator.manual_seed(seed)
     return torch.randn(
         shape,
         dtype=dtype,

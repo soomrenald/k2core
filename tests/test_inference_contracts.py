@@ -10,6 +10,7 @@ from k2core.inference import (
     GenerationRequest,
     ImageEditRequest,
     InferenceBackend,
+    LoraSpec,
     PipelineConfig,
     UnsupportedFeatureError,
     configured_backend_name,
@@ -128,6 +129,33 @@ class InferenceContractTests(unittest.TestCase):
                 steps=8,
                 seed=1,
                 cfg=2.0,
+            )
+
+    def test_native_backend_advertises_only_clean_generation_and_rejects_extensions(
+        self,
+    ) -> None:
+        backend = NativeK2Backend()
+        capabilities = backend.capabilities()
+        self.assertEqual(capabilities.modes, frozenset({"text_to_image"}))
+        self.assertTrue(capabilities.metadata["developer_only"])
+        with self.assertRaisesRegex(UnsupportedFeatureError, "LoRAs"):
+            backend.generate(
+                GenerationRequest(
+                    correlation_id="native-unsupported",
+                    prompt="fixture",
+                    width=512,
+                    height=512,
+                    steps=8,
+                    seed=1,
+                    output_directory=Path("/tmp"),
+                    loras=(
+                        LoraSpec(
+                            lora_id="one",
+                            name="one",
+                            path=Path("/tmp/one.safetensors"),
+                        ),
+                    ),
+                )
             )
 
     def test_model_loading_runtime_errors_are_classified_as_initialization(self) -> None:

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from k2core.backends import ComfyUIBackend, NativeK2Backend
 from k2core.inference import (
+    BackendInitializationError,
     ConfigurationError,
     GenerationRequest,
     ImageEditRequest,
@@ -12,6 +13,7 @@ from k2core.inference import (
     PipelineConfig,
     UnsupportedFeatureError,
     configured_backend_name,
+    convert_error,
     select_backend,
 )
 from k2core.model import ArtifactSet
@@ -127,6 +129,15 @@ class InferenceContractTests(unittest.TestCase):
                 seed=1,
                 cfg=2.0,
             )
+
+    def test_model_loading_runtime_errors_are_classified_as_initialization(self) -> None:
+        structured = convert_error(
+            RuntimeError("GPU accelerator is unavailable"),
+            backend_name="comfyui",
+            phase="model_loading",
+        )
+        self.assertIsInstance(structured, BackendInitializationError)
+        self.assertTrue(structured.retry_safe)
 
     def test_image_edit_uses_same_backend_adapter(self) -> None:
         runtime = Runtime()

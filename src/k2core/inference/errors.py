@@ -144,6 +144,15 @@ def convert_error(
             retry_safe=False,
             **common,
         )
+    if phase in {"backend_initialization", "model_loading"}:
+        return BackendInitializationError(
+            str(error) or "The inference backend could not be initialized.",
+            remediation=(
+                "Verify the selected backend, accelerator runtime, and model configuration."
+            ),
+            retry_safe=True,
+            **common,
+        )
     return GenerationError(
         str(error) or "Inference failed.",
         retry_safe=False,

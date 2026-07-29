@@ -46,6 +46,7 @@ from k2core.inference.schemas import (
 )
 from k2core.output import validate_filename_prefix
 from k2core.regional_prompting import (
+    BoundRegionalPromptPlan,
     RegionalPromptPlan,
     compile_regional_prompt_plan,
 )
@@ -303,11 +304,14 @@ class NativeK2Backend:
             emit("vae_decode", fraction=1.0)
 
             regional_summary = (
-                {
-                    **bound_regional_plan.summary(),
-                    **attention_override.summary(),
-                }
-                if bound_regional_plan is not None and attention_override is not None
+                _native_regional_summary(
+                    regional_plan,
+                    bound_regional_plan,
+                    attention_override,
+                )
+                if regional_plan is not None
+                and bound_regional_plan is not None
+                and attention_override is not None
                 else {
                     "backend": "disabled",
                     "region_count": 0,
@@ -469,6 +473,33 @@ def _compile_native_regional_plan(
         late_step_scale=request.regional_late_step_scale,
         emphases=request.prompt_emphases,
     )
+
+
+def _native_regional_summary(
+    plan: RegionalPromptPlan,
+    bound_plan: BoundRegionalPromptPlan,
+    attention_override: KreaSpatialAttentionOverride,
+) -> dict[str, Any]:
+    plan_summary = plan.summary()
+    bound_summary = bound_plan.summary()
+    plan_regions = plan_summary["regions"]
+    bound_regions = bound_summary["regions"]
+    if len(plan_regions) != len(bound_regions):
+        raise RuntimeError("native regional metadata plans do not align")
+    return {
+        **plan_summary,
+        **bound_summary,
+        "regions": [
+            {**compiled, **bound}
+            for compiled, bound in zip(
+                plan_regions,
+                bound_regions,
+                strict=True,
+            )
+        ],
+        "attention_calls": attention_override.matched_calls,
+        **attention_override.summary(),
+    }
 
 
 def _progress_emitter(

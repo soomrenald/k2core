@@ -48,6 +48,35 @@ class PixelBox:
 
 
 @dataclass(frozen=True, slots=True)
+class NormalizedBox:
+    """Half-open rectangle in normalized canvas coordinates."""
+
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
+    def __post_init__(self) -> None:
+        values = (self.x0, self.y0, self.x1, self.y1)
+        if not all(isfinite(value) for value in values):
+            raise ValueError("normalized box coordinates must be finite")
+        if not all(0.0 <= value <= 1.0 for value in values):
+            raise ValueError("normalized box coordinates must be between zero and one")
+        if self.x1 <= self.x0 or self.y1 <= self.y0:
+            raise ValueError("normalized box must have positive width and height")
+
+    def to_pixels(self, width: int, height: int) -> PixelBox:
+        if width <= 0 or height <= 0:
+            raise ValueError("canvas dimensions must be positive")
+        return PixelBox(
+            self.x0 * width,
+            self.y0 * height,
+            self.x1 * width,
+            self.y1 * height,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class CanvasGeometry:
     requested_width: int
     requested_height: int
@@ -120,4 +149,3 @@ class CanvasGeometry:
                 index = self.image_lane_index(row, column)
                 values[index] = self.overlap_fraction(self.token_box(row, column), clipped)
         return tuple(values)
-

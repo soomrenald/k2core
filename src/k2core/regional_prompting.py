@@ -5,7 +5,7 @@ from math import hypot
 from numbers import Integral
 from typing import Callable
 
-from k2core.regions import CanvasGeometry, PixelBox, RegionDefinition
+from k2core.regions import CanvasGeometry, NormalizedBox, PixelBox, RegionDefinition
 
 
 BACKEND = "krea-unified-spatial-attention-v6"
@@ -128,12 +128,8 @@ class RegionalPromptPlan:
             RegionalTokenSpan(
                 region_id=region.region_id,
                 name=region.name,
-                start=prompt_prefix_token_count(
-                    self.prompt[: region.character_span[0]]
-                ),
-                end=prompt_prefix_token_count(
-                    self.prompt[: region.character_span[1]]
-                ),
+                start=prompt_prefix_token_count(self.prompt[: region.character_span[0]]),
+                end=prompt_prefix_token_count(self.prompt[: region.character_span[1]]),
                 image_token_field=region.image_token_field,
                 image_token_mask=region.image_token_mask,
                 spatial_role=region.spatial_role,
@@ -154,12 +150,8 @@ class RegionalPromptPlan:
                 scope_id=emphasis.scope_id,
                 phrase=emphasis.phrase,
                 strength=emphasis.strength,
-                start=prompt_prefix_token_count(
-                    self.prompt[: emphasis.character_span[0]].rstrip()
-                ),
-                end=prompt_prefix_token_count(
-                    self.prompt[: emphasis.character_span[1]]
-                ),
+                start=prompt_prefix_token_count(self.prompt[: emphasis.character_span[0]].rstrip()),
+                end=prompt_prefix_token_count(self.prompt[: emphasis.character_span[1]]),
                 image_token_field=emphasis.image_token_field,
             )
             for emphasis in self.emphases
@@ -190,17 +182,13 @@ class RegionalPromptPlan:
             for identity in self.character_identities
         )
         if any(
-            end <= start
-            for identity in character_identities
-            for start, end in identity.token_spans
+            end <= start for identity in character_identities for start, end in identity.token_spans
         ):
             raise ValueError("each character identity trigger must own at least one text token")
         if (
             character_identities
             and max(
-                end
-                for identity in character_identities
-                for _start, end in identity.token_spans
+                end for identity in character_identities for _start, end in identity.token_spans
             )
             > text_token_count
         ):
@@ -209,12 +197,8 @@ class RegionalPromptPlan:
             FaceIdentityTokenSpan(
                 region_id=identity.region_id,
                 prompt=identity.prompt,
-                start=prompt_prefix_token_count(
-                    self.prompt[: identity.character_span[0]]
-                ),
-                end=prompt_prefix_token_count(
-                    self.prompt[: identity.character_span[1]]
-                ),
+                start=prompt_prefix_token_count(self.prompt[: identity.character_span[0]]),
+                end=prompt_prefix_token_count(self.prompt[: identity.character_span[1]]),
             )
             for identity in self.face_identities
         )
@@ -413,20 +397,14 @@ def compile_regional_prompt_plan(
         else _soft_box_field(geometry, box, float(falloff_pixels))
         for (_, box), role in zip(active, roles, strict=True)
     )
-    fields = (
-        _apply_subject_competition(raw_fields, roles)
-        if subject_competition
-        else raw_fields
-    )
+    fields = _apply_subject_competition(raw_fields, roles) if subject_competition else raw_fields
 
     prompt = _sentence(global_prompt.strip())
     compiled: list[UnifiedPromptRegion] = []
     resolved_identities: list[ResolvedCharacterIdentity] = []
     resolved_face_identities: list[ResolvedFaceIdentityPrompt] = []
     identity_triggers = character_identity_triggers or {}
-    for (region, box), role, image_token_field in zip(
-        active, roles, fields, strict=True
-    ):
+    for (region, box), role, image_token_field in zip(active, roles, fields, strict=True):
         clause = _regional_clause(
             region,
             box,
@@ -550,9 +528,7 @@ def _resolve_prompt_emphases(
     resolved: list[ResolvedPromptEmphasis] = []
     for emphasis in emphases:
         if emphasis.scope_id == GLOBAL_EMPHASIS_SCOPE:
-            start = _nth_occurrence(
-                prompt[:global_end], emphasis.phrase, emphasis.occurrence
-            )
+            start = _nth_occurrence(prompt[:global_end], emphasis.phrase, emphasis.occurrence)
             field = (1.0,) * image_token_count
         else:
             region = by_id.get(emphasis.scope_id)
@@ -561,9 +537,7 @@ def _resolve_prompt_emphases(
                     "prompt emphasis references a region without an active prompt: "
                     f"{emphasis.scope_id}"
                 )
-            source_offset = _nth_occurrence(
-                region.prompt, emphasis.phrase, emphasis.occurrence
-            )
+            source_offset = _nth_occurrence(region.prompt, emphasis.phrase, emphasis.occurrence)
             description = region.prompt.strip().rstrip(".!? ")
             description_offset = region.clause.find(description)
             if description_offset < 0:
@@ -573,10 +547,7 @@ def _resolve_prompt_emphases(
                 )
             leading_whitespace = len(region.prompt) - len(region.prompt.lstrip())
             start = (
-                region.character_span[0]
-                + description_offset
-                + source_offset
-                - leading_whitespace
+                region.character_span[0] + description_offset + source_offset - leading_whitespace
             )
             field = region.image_token_field
         resolved.append(
@@ -596,9 +567,7 @@ def _nth_occurrence(text: str, phrase: str, occurrence: int) -> int:
     for _ in range(occurrence + 1):
         start = text.find(phrase, start)
         if start < 0:
-            raise ValueError(
-                f"emphasized phrase {phrase!r} no longer occurs in its prompt scope"
-            )
+            raise ValueError(f"emphasized phrase {phrase!r} no longer occurs in its prompt scope")
         if _ < occurrence:
             start += len(phrase)
     return start
@@ -727,32 +696,20 @@ def _vertical_position(percent: float) -> str:
     return "bottom"
 
 
-def _relationship_clause(
-    regions: list[UnifiedPromptRegion], width: int, height: int
-) -> str:
-    subjects = [
-        region
-        for region in regions
-        if region.spatial_role == "subject"
-    ]
+def _relationship_clause(regions: list[UnifiedPromptRegion], width: int, height: int) -> str:
+    subjects = [region for region in regions if region.spatial_role == "subject"]
     if len(subjects) < 2:
         return ""
-    left_to_right = sorted(
-        subjects, key=lambda region: (region.box.x0 + region.box.x1) / 2.0
-    )
+    left_to_right = sorted(subjects, key=lambda region: (region.box.x0 + region.box.x1) / 2.0)
     names = [region.name for region in left_to_right]
     if len(names) == 2:
         ordering = f"{names[0]} is to the left of {names[1]}"
     else:
         ordering = (
-            "From left to right, the subjects are "
-            + ", ".join(names[:-1])
-            + f", and {names[-1]}"
+            "From left to right, the subjects are " + ", ".join(names[:-1]) + f", and {names[-1]}"
         )
 
-    lowest = max(
-        subjects, key=lambda region: (region.box.y0 + region.box.y1) / 2.0
-    )
+    lowest = max(subjects, key=lambda region: (region.box.y0 + region.box.y1) / 2.0)
     other_centers = [
         (region.box.y0 + region.box.y1) / 2.0
         for region in subjects
@@ -766,8 +723,7 @@ def _relationship_clause(
         for second in left_to_right[index + 1 :]:
             height_ratio = first.box.height / second.box.height
             center_difference = abs(
-                (first.box.y0 + first.box.y1)
-                - (second.box.y0 + second.box.y1)
+                (first.box.y0 + first.box.y1) - (second.box.y0 + second.box.y1)
             ) / (2.0 * height)
             if 0.85 <= height_ratio <= 1.15 and center_difference <= 0.10:
                 equally_scaled.append(
@@ -819,9 +775,7 @@ def _soft_box_field(
     return tuple(values)
 
 
-def _effective_spatial_role(
-    region: RegionDefinition, box: PixelBox, canvas_width: int
-) -> str:
+def _effective_spatial_role(region: RegionDefinition, box: PixelBox, canvas_width: int) -> str:
     if region.spatial_role != "auto":
         return region.spatial_role
     return "background" if box.width >= 0.70 * canvas_width else "subject"
@@ -875,9 +829,7 @@ def _apply_subject_competition(
         return fields
     competed = [list(field) for field in fields]
     for token_index in range(len(fields[0])):
-        squared = {
-            index: fields[index][token_index] ** 2 for index in subject_indices
-        }
+        squared = {index: fields[index][token_index] ** 2 for index in subject_indices}
         denominator = sum(squared.values())
         if denominator == 0.0:
             continue
@@ -920,16 +872,20 @@ def krea_prompt_token_count(tokenized: dict[str, list[list[tuple]]]) -> int:
     raise ValueError("Krea Qwen wrapper is missing the user <|im_end|> token")
 
 
-def region_definitions_from_payload(items: list[dict]) -> tuple[RegionDefinition, ...]:
+def region_definitions_from_payload(
+    items: list[dict],
+    *,
+    canvas_width: int | None = None,
+    canvas_height: int | None = None,
+) -> tuple[RegionDefinition, ...]:
     return tuple(
         RegionDefinition(
             region_id=str(item["id"]),
             name=str(item.get("name", item["id"])),
-            box=PixelBox(
-                float(item["box"]["x0"]),
-                float(item["box"]["y0"]),
-                float(item["box"]["x1"]),
-                float(item["box"]["y1"]),
+            box=_payload_pixel_box(
+                item,
+                canvas_width=canvas_width,
+                canvas_height=canvas_height,
             ),
             prompt=str(item.get("prompt", "")),
             negative_prompt=str(item.get("negative_prompt", "")),
@@ -941,3 +897,27 @@ def region_definitions_from_payload(items: list[dict]) -> tuple[RegionDefinition
         for item in items
     )
 
+
+def _payload_pixel_box(
+    item: dict,
+    *,
+    canvas_width: int | None,
+    canvas_height: int | None,
+) -> PixelBox:
+    normalized = item.get("normalized_box")
+    if normalized is not None:
+        if canvas_width is None or canvas_height is None:
+            raise ValueError("normalized region coordinates require canvas dimensions")
+        return NormalizedBox(
+            float(normalized["x0"]),
+            float(normalized["y0"]),
+            float(normalized["x1"]),
+            float(normalized["y1"]),
+        ).to_pixels(canvas_width, canvas_height)
+    box = item["box"]
+    return PixelBox(
+        float(box["x0"]),
+        float(box["y0"]),
+        float(box["x1"]),
+        float(box["y1"]),
+    )

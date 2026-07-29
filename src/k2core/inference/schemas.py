@@ -196,18 +196,24 @@ class GenerationRequest:
     def from_payload(
         cls, payload: Mapping[str, Any], *, correlation_id: str
     ) -> "GenerationRequest":
+        width = int(payload.get("width", 1024))
+        height = int(payload.get("height", 1024))
         return cls(
             correlation_id=correlation_id,
             prompt=str(payload.get("prompt", "")),
-            width=int(payload.get("width", 1024)),
-            height=int(payload.get("height", 1024)),
+            width=width,
+            height=height,
             steps=int(payload.get("steps", 8)),
             seed=int(payload.get("seed", 0)),
             sampler=str(payload.get("sampler", DEFAULT_SAMPLER)),
             scheduler=str(payload.get("scheduler", DEFAULT_SCHEDULER)),
             output_directory=Path(payload["output_directory"]),
             filename_prefix=str(payload.get("filename_prefix", "baseline")),
-            regions=region_definitions_from_payload(list(payload.get("regions", []))),
+            regions=region_definitions_from_payload(
+                list(payload.get("regions", [])),
+                canvas_width=width,
+                canvas_height=height,
+            ),
             prompt_emphases=prompt_emphases_from_payload(list(payload.get("prompt_emphases", []))),
             loras=tuple(LoraSpec.from_payload(item) for item in payload.get("loras", [])),
             regional_prompting=bool(payload.get("regional_prompting", True)),

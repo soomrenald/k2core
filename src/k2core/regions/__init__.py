@@ -1,6 +1,11 @@
 """Generic pixel-space region geometry and layouts."""
 
-from k2core.regions.geometry import CanvasGeometry, PixelBox, align_up
+from k2core.regions.geometry import (
+    CanvasGeometry,
+    NormalizedBox,
+    PixelBox,
+    align_up,
+)
 from k2core.regions.layout import (
     REGION_ROLES,
     RegionDefinition,
@@ -10,6 +15,7 @@ from k2core.regions.layout import (
 
 __all__ = [
     "CanvasGeometry",
+    "NormalizedBox",
     "PixelBox",
     "REGION_ROLES",
     "RegionDefinition",
@@ -17,4 +23,3 @@ __all__ = [
     "align_up",
     "compile_spatial_layout",
 ]
-

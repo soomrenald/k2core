@@ -22,27 +22,19 @@ from k2core.spatial_attention import (
 class RegionalPromptingTests(unittest.TestCase):
     def test_scene_compiles_one_scene_ordered_prompt(self) -> None:
         regions = (
-            RegionDefinition(
-                "dog", "dog", PixelBox(440, 800, 600, 980), "a small brown dog"
-            ),
-            RegionDefinition(
-                "sand", "sand", PixelBox(0, 680, 1024, 1024), "white sand"
-            ),
+            RegionDefinition("dog", "dog", PixelBox(440, 800, 600, 980), "a small brown dog"),
+            RegionDefinition("sand", "sand", PixelBox(0, 680, 1024, 1024), "white sand"),
             RegionDefinition(
                 "left", "left subject", PixelBox(100, 410, 250, 900), "a woman in red"
             ),
-            RegionDefinition(
-                "sky", "sky", PixelBox(0, 0, 1024, 320), "clear blue sky"
-            ),
+            RegionDefinition("sky", "sky", PixelBox(0, 0, 1024, 320), "clear blue sky"),
             RegionDefinition(
                 "right",
                 "right subject",
                 PixelBox(650, 390, 850, 910),
                 "a woman in blue",
             ),
-            RegionDefinition(
-                "ocean", "ocean", PixelBox(0, 320, 1024, 680), "tropical ocean"
-            ),
+            RegionDefinition("ocean", "ocean", PixelBox(0, 320, 1024, 680), "tropical ocean"),
         )
         global_prompt = "photorealistic beach scene"
 
@@ -155,18 +147,12 @@ class RegionalPromptingTests(unittest.TestCase):
         self.assertEqual(values[1], 0.75)
         self.assertEqual(values[2], -0.5)
 
-        stronger_outside = spatial_pair_bias(
-            (1.0, 0.5, 0.0), 2.0, outside_penalty=1.5
-        )
+        stronger_outside = spatial_pair_bias((1.0, 0.5, 0.0), 2.0, outside_penalty=1.5)
         self.assertEqual(stronger_outside, (2.0, 0.25, -1.5))
 
     def test_attention_guidance_stays_strong_early_and_relaxes_late(self) -> None:
-        region = RegionDefinition(
-            "subject", "Subject", PixelBox(0, 0, 32, 32), "red vase"
-        )
-        plan = compile_regional_prompt_plan(
-            64, 64, "gallery", (region,), late_step_scale=0.35
-        )
+        region = RegionDefinition("subject", "Subject", PixelBox(0, 0, 32, 32), "red vase")
+        plan = compile_regional_prompt_plan(64, 64, "gallery", (region,), late_step_scale=0.35)
         override = KreaSpatialAttentionOverride(
             plan.bind_tokens(lambda prefix: len(prefix.split()))
         )
@@ -192,9 +178,7 @@ class RegionalPromptingTests(unittest.TestCase):
         owners = torch.tensor(text_region_ownership(bound), dtype=torch.int16)
         scores = torch.zeros((1, 1, bound.text_token_count, bound.text_token_count))
 
-        override._partition_regional_text(
-            scores, 0, bound.text_token_count, owners
-        )
+        override._partition_regional_text(scores, 0, bound.text_token_count, owners)
 
         left, right = bound.spans
         self.assertTrue(torch.isneginf(scores[0, 0, left.start, right.start]))
@@ -239,9 +223,7 @@ class RegionalPromptingTests(unittest.TestCase):
             RegionDefinition("left", "Left", PixelBox(0, 0, 16, 16), "red coat"),
             RegionDefinition("right", "Right", PixelBox(16, 0, 32, 16), "blue coat"),
         )
-        plan = compile_regional_prompt_plan(
-            32, 16, "portrait", regions, falloff_pixels=0.0
-        )
+        plan = compile_regional_prompt_plan(32, 16, "portrait", regions, falloff_pixels=0.0)
         bound = plan.bind_tokens(len, conditioning_text_token_count=len(plan.prompt))
         override = KreaSpatialAttentionOverride(bound)
         reference = torch.zeros((1, 1, bound.text_token_count + 2, 1))
@@ -269,9 +251,7 @@ class RegionalPromptingTests(unittest.TestCase):
         self.assertEqual(float(scores[0, 0, left_image, 0]), 0.0)
 
     def test_lora_delta_adaptation_uses_bounded_region_scales(self) -> None:
-        region = RegionDefinition(
-            "subject", "Subject", PixelBox(0, 0, 32, 32), "red vase"
-        )
+        region = RegionDefinition("subject", "Subject", PixelBox(0, 0, 32, 32), "red vase")
         plan = compile_regional_prompt_plan(64, 64, "gallery", (region,))
         override = KreaSpatialAttentionOverride(
             plan.bind_tokens(lambda prefix: len(prefix.split())),
@@ -287,9 +267,7 @@ class RegionalPromptingTests(unittest.TestCase):
         self.assertEqual(summary["final_region_scales"], {"subject": 1.5})
 
     def test_prompt_emphasis_binds_global_and_region_phrases_to_tokens(self) -> None:
-        region = RegionDefinition(
-            "subject", "Subject", PixelBox(0, 0, 32, 64), "a red glass vase"
-        )
+        region = RegionDefinition("subject", "Subject", PixelBox(0, 0, 32, 64), "a red glass vase")
         plan = compile_regional_prompt_plan(
             64,
             64,
@@ -307,9 +285,7 @@ class RegionalPromptingTests(unittest.TestCase):
         self.assertEqual(bound.emphases[0].phrase, "distinct people")
         self.assertEqual(bound.emphases[0].image_token_field, (1.0,) * 16)
         self.assertEqual(bound.emphases[1].phrase, "red glass")
-        self.assertEqual(
-            bound.emphases[1].image_token_field, plan.regions[0].image_token_field
-        )
+        self.assertEqual(bound.emphases[1].image_token_field, plan.regions[0].image_token_field)
         self.assertLess(bound.emphases[0].start, bound.emphases[0].end)
         self.assertLess(bound.emphases[1].start, bound.emphases[1].end)
 
@@ -349,9 +325,7 @@ class RegionalPromptingTests(unittest.TestCase):
             spatial_role="background",
         )
 
-        subject_plan = compile_regional_prompt_plan(
-            96, 96, "scene", (subject,), falloff_pixels=16
-        )
+        subject_plan = compile_regional_prompt_plan(96, 96, "scene", (subject,), falloff_pixels=16)
         background_plan = compile_regional_prompt_plan(
             96, 96, "scene", (background,), falloff_pixels=16
         )
@@ -362,12 +336,8 @@ class RegionalPromptingTests(unittest.TestCase):
             subject_plan.regions[0].image_token_field[center],
             subject_plan.regions[0].image_token_field[near_edge],
         )
-        self.assertEqual(
-            background_plan.regions[0].image_token_field[center], 1.0
-        )
-        self.assertEqual(
-            background_plan.regions[0].image_token_field[near_edge], 1.0
-        )
+        self.assertEqual(background_plan.regions[0].image_token_field[center], 1.0)
+        self.assertEqual(background_plan.regions[0].image_token_field[near_edge], 1.0)
 
     def test_subject_fill_strengthens_box_edges_and_can_be_disabled(self) -> None:
         subject = RegionDefinition(
@@ -405,9 +375,7 @@ class RegionalPromptingTests(unittest.TestCase):
                 "wall", "Wall", PixelBox(0, 0, 96, 96), "white wall", spatial_role="background"
             ),
         )
-        raw = compile_regional_prompt_plan(
-            96, 96, "gallery", regions, subject_competition=False
-        )
+        raw = compile_regional_prompt_plan(96, 96, "gallery", regions, subject_competition=False)
         competed = compile_regional_prompt_plan(
             96, 96, "gallery", regions, subject_competition=True
         )
@@ -524,9 +492,7 @@ class RegionalPromptingTests(unittest.TestCase):
             "Person",
             PixelBox(0, 0, 32, 64),
             "standing beside a window",
-            face_identity_prompt=(
-                "lface, a specific woman with brown hair and an oval face"
-            ),
+            face_identity_prompt=("lface, a specific woman with brown hair and an oval face"),
             spatial_role="subject",
         )
 
@@ -534,8 +500,7 @@ class RegionalPromptingTests(unittest.TestCase):
         bound = plan.bind_tokens(len, conditioning_text_token_count=len(plan.prompt))
 
         self.assertIn(
-            "lface, a specific woman with brown hair and an oval face. "
-            "standing beside a window",
+            "lface, a specific woman with brown hair and an oval face. standing beside a window",
             plan.prompt,
         )
         self.assertEqual(len(plan.face_identities), 1)
@@ -572,7 +537,29 @@ class RegionalPromptingTests(unittest.TestCase):
         self.assertEqual(regions[0].priority, 3)
         self.assertEqual(regions[0].spatial_role, "subject")
 
+    def test_worker_payload_accepts_explicit_normalized_coordinates(self) -> None:
+        regions = region_definitions_from_payload(
+            [
+                {
+                    "id": "normalized",
+                    "normalized_box": {
+                        "x0": 0.1,
+                        "y0": 0.25,
+                        "x1": 0.6,
+                        "y1": 0.75,
+                    },
+                    "prompt": "a vase",
+                }
+            ],
+            canvas_width=1000,
+            canvas_height=400,
+        )
+
+        self.assertEqual(
+            regions[0].box,
+            PixelBox(100.0, 100.0, 600.0, 300.0),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
-

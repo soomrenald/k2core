@@ -4,6 +4,7 @@ import unittest
 
 from k2core.regions import (
     CanvasGeometry,
+    NormalizedBox,
     PixelBox,
     RegionDefinition,
     align_up,
@@ -12,6 +13,16 @@ from k2core.regions import (
 
 
 class GeometryTests(unittest.TestCase):
+    def test_normalized_box_converts_to_pixel_space(self) -> None:
+        box = NormalizedBox(0.125, 0.25, 0.75, 1.0)
+
+        self.assertEqual(
+            box.to_pixels(800, 400),
+            PixelBox(100.0, 100.0, 600.0, 400.0),
+        )
+        with self.assertRaisesRegex(ValueError, "between zero and one"):
+            NormalizedBox(-0.1, 0.0, 0.5, 0.5)
+
     def test_alignment_and_krea_grid(self) -> None:
         self.assertEqual(align_up(1000, 16), 1008)
         geometry = CanvasGeometry.resolve(1024, 1024)
@@ -62,4 +73,3 @@ class GeometryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

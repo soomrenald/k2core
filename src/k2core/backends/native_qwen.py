@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from k2core.backends.native_loading import NativeComponent
+from k2core.backends.native_quant import replace_submodule, scaled_fp8_linear_class
 from k2core.backends.native_text import KreaPromptTokens, load_tokenizer, tokenize_prompt
 from k2core.inference.errors import (
     ConfigurationError,
@@ -186,7 +187,7 @@ def build_qwen_text_encoder(
         model = Qwen3VLTextModel(config)
 
     quantized_paths = _validate_quantization_markers(component.tensors)
-    scaled_linear = _scaled_fp8_linear_class(torch, nn, functional)
+    scaled_linear = scaled_fp8_linear_class(torch, nn, functional)
     for module_path in sorted(quantized_paths):
         original = model.get_submodule(module_path)
         if not isinstance(original, nn.Linear):
@@ -201,7 +202,7 @@ def build_qwen_text_encoder(
             bias=original.bias is not None,
             device="meta",
         )
-        _replace_submodule(model, module_path, replacement)
+        replace_submodule(model, module_path, replacement)
 
     state, ignored_vision = _text_state_dict(component.tensors)
     expected = model.state_dict()
@@ -377,66 +378,6 @@ def _validate_state_dict_shapes(
             phase="text_encoding",
             remediation="Review the complete text-only state-dict mapping.",
         )
-
-
-def _replace_submodule(model: Any, path: str, replacement: Any) -> None:
-    parent_path, _, name = path.rpartition(".")
-    parent = model.get_submodule(parent_path) if parent_path else model
-    setattr(parent, name, replacement)
-
-
-def _scaled_fp8_linear_class(torch, nn, functional):
-    class ScaledFP8Linear(nn.Module):
-        def __init__(
-            self,
-            in_features: int,
-            out_features: int,
-            *,
-            bias: bool,
-            device: str,
-        ) -> None:
-            super().__init__()
-            self.in_features = in_features
-            self.out_features = out_features
-            self.weight = nn.Parameter(
-                torch.empty(
-                    (out_features, in_features),
-                    device=device,
-                    dtype=torch.float8_e4m3fn,
-                ),
-                requires_grad=False,
-            )
-            self.weight_scale = nn.Parameter(
-                torch.empty((), device=device, dtype=torch.float32),
-                requires_grad=False,
-            )
-            self.bias = (
-                nn.Parameter(
-                    torch.empty(out_features, device=device),
-                    requires_grad=False,
-                )
-                if bias
-                else None
-            )
-
-        def forward(self, inputs):
-            weight = self.weight.to(dtype=inputs.dtype) * self.weight_scale.to(
-                dtype=inputs.dtype
-            )
-            bias = (
-                self.bias.to(dtype=inputs.dtype)
-                if self.bias is not None
-                else None
-            )
-            return functional.linear(inputs, weight, bias)
-
-        def extra_repr(self) -> str:
-            return (
-                f"in_features={self.in_features}, "
-                f"out_features={self.out_features}, scaled_fp8=True"
-            )
-
-    return ScaledFP8Linear
 
 
 __all__ = [

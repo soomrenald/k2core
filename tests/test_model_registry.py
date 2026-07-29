@@ -277,9 +277,13 @@ class ModelRegistryTests(unittest.TestCase):
             diffusion = root / "models" / "diffusion_models"
             text = root / "models" / "text_encoders"
             vae_directory = root / "models" / "vae"
+            tokenizer_directory = root / "comfy" / "text_encoders" / "qwen25_tokenizer"
             diffusion.mkdir(parents=True)
             text.mkdir()
             vae_directory.mkdir()
+            tokenizer_directory.mkdir(parents=True)
+            for name in ("merges.txt", "tokenizer_config.json", "vocab.json"):
+                (tokenizer_directory / name).write_text(name, encoding="utf-8")
             transformer, text_encoder, vae = _model_files(root)
             moved_transformer = diffusion / transformer.name
             moved_text = text / text_encoder.name
@@ -300,6 +304,10 @@ class ModelRegistryTests(unittest.TestCase):
             self.assertTrue(validation.valid)
             self.assertEqual(registry.source, "legacy_comfyui_scan")
             self.assertIn(str(moved_transformer.resolve()), registry.to_toml())
+            self.assertEqual(
+                registry.models[0].tokenizer.path,
+                tokenizer_directory,
+            )
             after = {
                 path: (path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest())
                 for path in (moved_transformer, moved_text, moved_vae)

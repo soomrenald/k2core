@@ -38,12 +38,25 @@ class ComponentReference:
 
 
 @dataclass(frozen=True, slots=True)
+class TokenizerReference:
+    path: Path
+    sha256: str
+
+    def __post_init__(self) -> None:
+        normalized_hash = self.sha256.strip().casefold()
+        if not _SHA256_PATTERN.fullmatch(normalized_hash):
+            raise ValueError(f"invalid tokenizer SHA-256 for {self.path}")
+        object.__setattr__(self, "sha256", normalized_hash)
+
+
+@dataclass(frozen=True, slots=True)
 class RegisteredModel:
     name: str
     architecture: str
     transformer: ComponentReference
     text_encoder: ComponentReference
     vae: ComponentReference
+    tokenizer: TokenizerReference | None = None
     default_dtype: str = "bfloat16"
 
     def __post_init__(self) -> None:
@@ -105,6 +118,15 @@ class ModelRegistry:
                         f'sha256 = "{component.sha256}"',
                     ]
                 )
+            if model.tokenizer is not None:
+                lines.extend(
+                    [
+                        "",
+                        "[models.tokenizer]",
+                        f'path = "{_toml_string(str(model.tokenizer.path))}"',
+                        f'sha256 = "{model.tokenizer.sha256}"',
+                    ]
+                )
         return "\n".join(lines) + "\n"
 
 
@@ -152,6 +174,20 @@ def sha256_file(path: Path, *, chunk_size: int = 8 * 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
+def sha256_directory(path: Path) -> str:
+    root = path.expanduser().resolve(strict=True)
+    if not root.is_dir():
+        raise NotADirectoryError(root)
+    digest = hashlib.sha256()
+    files = sorted(item for item in root.rglob("*") if item.is_file())
+    for item in files:
+        relative = item.relative_to(root).as_posix().encode()
+        digest.update(len(relative).to_bytes(8, "little"))
+        digest.update(relative)
+        digest.update(bytes.fromhex(sha256_file(item)))
+    return digest.hexdigest()
+
+
 def load_model_registry(path: Path) -> ModelRegistry:
     configured_path = path.expanduser()
     with configured_path.open("rb") as handle:
@@ -188,6 +224,8 @@ def validate_model_registry(
             model_errors.append(
                 f"unsupported architecture {model.architecture!r}; expected 'krea2'"
             )
+        if model.tokenizer is not None:
+            model_errors.extend(_validate_tokenizer(model.tokenizer))
         components = tuple(
             _validate_component(
                 kind,
@@ -236,6 +274,16 @@ def scan_legacy_comfyui_models(directories: ModelDirectories) -> ModelRegistry:
 
     text_encoder = reference(shared.text_encoder)
     vae = reference(shared.vae)
+    inferred_root = directories.diffusion_models.expanduser().resolve().parents[1]
+    tokenizer_path = inferred_root / "comfy" / "text_encoders" / "qwen25_tokenizer"
+    tokenizer = (
+        TokenizerReference(
+            path=tokenizer_path,
+            sha256=sha256_directory(tokenizer_path),
+        )
+        if tokenizer_path.is_dir()
+        else None
+    )
     models = tuple(
         RegisteredModel(
             name=_registry_name(transformer.path),
@@ -243,6 +291,7 @@ def scan_legacy_comfyui_models(directories: ModelDirectories) -> ModelRegistry:
             transformer=reference(transformer),
             text_encoder=text_encoder,
             vae=vae,
+            tokenizer=tokenizer,
         )
         for transformer in transformers
     )
@@ -316,6 +365,7 @@ def _registered_model(value: Any) -> RegisteredModel:
         transformer=_component(value, ArtifactKind.TRANSFORMER),
         text_encoder=_component(value, ArtifactKind.TEXT_ENCODER),
         vae=_component(value, ArtifactKind.VAE),
+        tokenizer=_tokenizer(value),
     )
 
 
@@ -328,6 +378,40 @@ def _component(
         raise ValueError(f"model entry requires a [{kind.value}] component table")
     path = Path(_required_string(value, "path")).expanduser()
     return ComponentReference(path=path, sha256=_required_string(value, "sha256"))
+
+
+def _tokenizer(model: dict[str, Any]) -> TokenizerReference | None:
+    value = model.get("tokenizer")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("model tokenizer must be a TOML table")
+    return TokenizerReference(
+        path=Path(_required_string(value, "path")).expanduser(),
+        sha256=_required_string(value, "sha256"),
+    )
+
+
+def _validate_tokenizer(tokenizer: TokenizerReference) -> tuple[str, ...]:
+    configured = tokenizer.path.expanduser()
+    if not configured.is_absolute():
+        return (f"tokenizer path must be absolute: {tokenizer.path}",)
+    try:
+        resolved = configured.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        return (f"could not resolve tokenizer path {configured}: {error}",)
+    if not resolved.is_dir():
+        return (f"tokenizer path is not a directory: {resolved}",)
+    required = ("merges.txt", "tokenizer_config.json", "vocab.json")
+    missing = tuple(name for name in required if not (resolved / name).is_file())
+    errors = [f"tokenizer asset is missing: {name}" for name in missing]
+    if not errors:
+        observed = sha256_directory(resolved)
+        if observed != tokenizer.sha256:
+            errors.append(
+                f"SHA-256 mismatch for tokenizer: expected {tokenizer.sha256}, got {observed}"
+            )
+    return tuple(errors)
 
 
 def _required_string(value: dict[str, Any], key: str) -> str:
@@ -355,9 +439,11 @@ __all__ = [
     "RegisteredModel",
     "RegistryValidation",
     "SUPPORTED_ARCHITECTURES",
+    "TokenizerReference",
     "load_model_registry",
     "model_registry_from_document",
     "scan_legacy_comfyui_models",
+    "sha256_directory",
     "sha256_file",
     "validate_model_registry",
 ]

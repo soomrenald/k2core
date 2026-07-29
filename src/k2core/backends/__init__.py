@@ -139,14 +139,36 @@ from k2core.backends.native_loading import (  # noqa: E402
     NativeModelLoader,
     NativePipelineState,
 )
+from k2core.backends.native_sampling import (  # noqa: E402
+    DenoisingCheckpoint,
+    euler_flow_sample,
+    flux_time_shift,
+    prepare_noise,
+    simple_sigmas,
+)
+from k2core.backends.native_text import (  # noqa: E402
+    KREA2_TEMPLATE,
+    KreaPromptTokens,
+    load_tokenizer,
+    tokenize_prompt,
+)
 
 __all__ += [
     "ComfyKreaBackend",
     "ComfyUIBackend",
     "ComponentLoadReport",
+    "DenoisingCheckpoint",
+    "KREA2_TEMPLATE",
+    "KreaPromptTokens",
     "NativeComponent",
     "NativeComponentConfig",
     "NativeK2Backend",
     "NativeModelLoader",
     "NativePipelineState",
+    "euler_flow_sample",
+    "flux_time_shift",
+    "load_tokenizer",
+    "prepare_noise",
+    "simple_sigmas",
+    "tokenize_prompt",
 ]

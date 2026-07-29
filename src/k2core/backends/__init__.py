@@ -168,6 +168,13 @@ from k2core.backends.native_transformer import (  # noqa: E402
     NativeKrea2Transformer,
     build_krea2_transformer,
 )
+from k2core.backends.native_vae import (  # noqa: E402
+    KREA2_VAE_LATENT_CHANNELS,
+    KREA2_VAE_SCALE_FACTOR,
+    Krea2VAELoadReport,
+    NativeKrea2VAE,
+    build_krea2_vae,
+)
 
 __all__ += [
     "ComfyKreaBackend",
@@ -180,9 +187,12 @@ __all__ += [
     "KREA2_PATCH_SIZE",
     "KREA2_TEMPLATE",
     "KREA2_TEXT_FEATURE_SIZE",
+    "KREA2_VAE_LATENT_CHANNELS",
+    "KREA2_VAE_SCALE_FACTOR",
     "KreaPromptTokens",
     "KreaTextEncoding",
     "Krea2TransformerLoadReport",
+    "Krea2VAELoadReport",
     "NativeComponent",
     "NativeComponentConfig",
     "NativeK2Backend",
@@ -190,9 +200,11 @@ __all__ += [
     "NativePipelineState",
     "NativeQwenTextEncoder",
     "NativeKrea2Transformer",
+    "NativeKrea2VAE",
     "QwenExecutableLoadReport",
     "build_qwen_text_encoder",
     "build_krea2_transformer",
+    "build_krea2_vae",
     "euler_flow_sample",
     "flux_time_shift",
     "load_tokenizer",

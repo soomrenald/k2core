@@ -201,13 +201,7 @@ class NativeK2Backend:
                 config.device_policy.transformer_device,
             )
             latent = prepare_noise(
-                (
-                    1,
-                    16,
-                    1,
-                    request.height // 8,
-                    request.width // 8,
-                ),
+                _clean_latent_shape(request.width, request.height),
                 request.seed,
                 device="cpu",
                 dtype=torch.float32,
@@ -392,6 +386,14 @@ def _execution_device(torch, requested: str):
     if normalized == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(requested)
+
+
+def _clean_latent_shape(width: int, height: int) -> tuple[int, int, int, int, int]:
+    if width <= 0 or height <= 0 or width % 16 or height % 16:
+        raise ValueError(
+            "native clean dimensions must be positive multiples of 16"
+        )
+    return (1, 16, 1, height // 8, width // 8)
 
 
 def _progress_emitter(

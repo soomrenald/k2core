@@ -4,12 +4,14 @@ import unittest
 from pathlib import Path
 
 from k2core.backends import ComfyUIBackend, NativeK2Backend
+from k2core.backends.native import _clean_latent_shape
 from k2core.inference import (
     BackendInitializationError,
     ConfigurationError,
     GenerationRequest,
     ImageEditRequest,
     InferenceBackend,
+    InvalidRequestError,
     LoraSpec,
     PipelineConfig,
     UnsupportedFeatureError,
@@ -157,6 +159,48 @@ class InferenceContractTests(unittest.TestCase):
                     ),
                 )
             )
+
+    def test_native_clean_dimensions_map_to_reviewed_five_dimensional_latents(
+        self,
+    ) -> None:
+        cases = {
+            (256, 256): (1, 16, 1, 32, 32),
+            (512, 768): (1, 16, 1, 96, 64),
+            (1024, 1024): (1, 16, 1, 128, 128),
+            (1536, 1024): (1, 16, 1, 128, 192),
+        }
+        self.assertEqual(
+            {size: _clean_latent_shape(*size) for size in cases},
+            cases,
+        )
+        with self.assertRaisesRegex(ValueError, "multiples of 16"):
+            _clean_latent_shape(513, 512)
+
+    def test_native_clean_generation_rejects_malformed_or_unavailable_requests(
+        self,
+    ) -> None:
+        backend = NativeK2Backend()
+        base = {
+            "correlation_id": "native-invalid",
+            "prompt": "fixture",
+            "width": 512,
+            "height": 512,
+            "steps": 8,
+            "seed": 1,
+            "output_directory": Path("/tmp"),
+        }
+        with self.assertRaisesRegex(InvalidRequestError, "non-empty"):
+            backend.generate(GenerationRequest(**{**base, "prompt": "  "}))
+        with self.assertRaisesRegex(UnsupportedFeatureError, "Euler"):
+            backend.generate(GenerationRequest(**base, sampler="heun"))
+        with self.assertRaisesRegex(UnsupportedFeatureError, "simple"):
+            backend.generate(GenerationRequest(**base, scheduler="normal"))
+        with self.assertRaisesRegex(UnsupportedFeatureError, "negative prompts"):
+            backend.generate(
+                GenerationRequest(**base, negative_prompt="low quality")
+            )
+        with self.assertRaisesRegex(ConfigurationError, "must be loaded"):
+            backend.generate(GenerationRequest(**base))
 
     def test_model_loading_runtime_errors_are_classified_as_initialization(self) -> None:
         structured = convert_error(

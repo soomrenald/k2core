@@ -87,35 +87,21 @@ class RegionalLoraRoutingTests(unittest.TestCase):
             )
         )
         self.assertFalse(
-            route_allows_adapter_target(
-                route, "diffusion_model.blocks.0.attn.wk.weight"
-            )
+            route_allows_adapter_target(route, "diffusion_model.blocks.0.attn.wk.weight")
         )
         self.assertFalse(
-            route_allows_adapter_target(
-                route, "diffusion_model.blocks.0.attn.wv.weight"
-            )
+            route_allows_adapter_target(route, "diffusion_model.blocks.0.attn.wv.weight")
         )
         self.assertTrue(
-            route_allows_adapter_target(
-                route, "diffusion_model.blocks.0.attn.wq.weight"
-            )
+            route_allows_adapter_target(route, "diffusion_model.blocks.0.attn.wq.weight")
         )
         self.assertTrue(
-            route_allows_adapter_target(
-                route, "diffusion_model.blocks.0.attn.wo.weight"
-            )
+            route_allows_adapter_target(route, "diffusion_model.blocks.0.attn.wo.weight")
         )
         self.assertTrue(
-            route_allows_adapter_target(
-                route, "diffusion_model.blocks.0.mlp.down.weight"
-            )
+            route_allows_adapter_target(route, "diffusion_model.blocks.0.mlp.down.weight")
         )
-        self.assertFalse(
-            route_allows_adapter_target(
-                route, "diffusion_model.last.modulation.lin"
-            )
-        )
+        self.assertFalse(route_allows_adapter_target(route, "diffusion_model.last.modulation.lin"))
 
     def test_multiple_regions_are_combined_as_a_union(self) -> None:
         plan, bound = self._plans()
@@ -138,6 +124,62 @@ class RegionalLoraRoutingTests(unittest.TestCase):
         self.assertEqual(route.region_ids, ("left", "right"))
         self.assertEqual(route.image_token_mask, (1.0, 1.0))
         self.assertEqual(route.region_names, ("Left subject", "Right subject"))
+
+    def test_overlapping_lora_routes_keep_independent_additive_masks(self) -> None:
+        regions = (
+            RegionDefinition(
+                "wide-left",
+                "Wide left",
+                PixelBox(0, 0, 48, 16),
+                "red vase",
+            ),
+            RegionDefinition(
+                "wide-right",
+                "Wide right",
+                PixelBox(16, 0, 64, 16),
+                "blue vase",
+            ),
+        )
+        plan = compile_regional_prompt_plan(64, 16, "studio", regions)
+        bound = plan.bind_tokens(len, conditioning_text_token_count=len(plan.prompt))
+        left, right = compile_lora_delta_routes(
+            [
+                {
+                    "id": "left-style",
+                    "name": "Left style",
+                    "global": False,
+                    "region_ids": ["wide-left"],
+                },
+                {
+                    "id": "right-style",
+                    "name": "Right style",
+                    "global": False,
+                    "region_ids": ["wide-right"],
+                },
+            ],
+            width=64,
+            height=16,
+            text_token_count=bound.text_token_count,
+            regional_plan=plan,
+            bound_plan=bound,
+        )
+
+        self.assertEqual(left.image_token_mask, (1.0, 1.0, 1.0, 0.0))
+        self.assertEqual(right.image_token_mask, (0.0, 1.0, 1.0, 1.0))
+        self.assertEqual(
+            [
+                index
+                for index, masks in enumerate(
+                    zip(
+                        left.image_token_mask,
+                        right.image_token_mask,
+                        strict=True,
+                    )
+                )
+                if all(masks)
+            ],
+            [1, 2],
+        )
 
     def test_character_identity_route_keeps_full_regional_text_coverage(self) -> None:
         regions = (
@@ -176,9 +218,7 @@ class RegionalLoraRoutingTests(unittest.TestCase):
             bound_plan=bound,
         )[0]
 
-        region_span = next(
-            span for span in bound.spans if span.region_id == "person"
-        )
+        region_span = next(span for span in bound.spans if span.region_id == "person")
         enabled_indices = set(range(region_span.start, region_span.end))
         self.assertEqual(route.image_token_mask, (0.0, 1.0))
         self.assertEqual(
@@ -188,9 +228,7 @@ class RegionalLoraRoutingTests(unittest.TestCase):
         self.assertEqual(route.routing_mode, CHARACTER_IDENTITY_LORA_ROUTING)
         self.assertGreater(len(enabled_indices), 2)
         self.assertTrue(
-            route_allows_adapter_target(
-                route, "diffusion_model.blocks.0.attn.wv.weight"
-            )
+            route_allows_adapter_target(route, "diffusion_model.blocks.0.attn.wv.weight")
         )
 
     def test_global_route_enables_every_lane_without_a_regional_plan(self) -> None:
@@ -407,14 +445,16 @@ class RegionalLoraRoutingTests(unittest.TestCase):
         runtime._load_lora_patches = MethodType(fake_load, runtime)
         with self.assertRaisesRegex(ValueError, "no targets that can be routed locally"):
             runtime._apply_routed_loras(
-                [{
-                    "id": "broadcast-only",
-                    "name": "Broadcast only",
-                    "path": "/unused/broadcast.safetensors",
-                    "strength": 1.0,
-                    "global": False,
-                    "region_ids": ["right"],
-                }],
+                [
+                    {
+                        "id": "broadcast-only",
+                        "name": "Broadcast only",
+                        "path": "/unused/broadcast.safetensors",
+                        "strength": 1.0,
+                        "global": False,
+                        "region_ids": ["right"],
+                    }
+                ],
                 base_model=runtime.model,
                 width=32,
                 height=16,
@@ -508,9 +548,7 @@ class RegionalLoraRoutingTests(unittest.TestCase):
         comfy.__path__ = []
         management = ModuleType("comfy.model_management")
         management.unload_all_models = lambda: calls.append("unload")
-        management.soft_empty_cache = lambda force=False: calls.append(
-            f"empty:{force}"
-        )
+        management.soft_empty_cache = lambda force=False: calls.append(f"empty:{force}")
         comfy.model_management = management
 
         class FakeGenerationModel:
@@ -543,4 +581,3 @@ class RegionalLoraRoutingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

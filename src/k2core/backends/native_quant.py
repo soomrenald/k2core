@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from k2core.inference.schemas import DTypePolicy
+
 
 def replace_submodule(model: Any, path: str, replacement: Any) -> None:
     parent_path, _, name = path.rpartition(".")
@@ -113,4 +115,24 @@ def scaled_fp8_linear_class(torch, nn, functional):
     return ScaledFP8Linear
 
 
-__all__ = ["replace_submodule", "scaled_fp8_linear_class"]
+def apply_compute_dtype(model: Any, torch: Any, policy: DTypePolicy) -> None:
+    """Convert BF16 full-precision lanes without altering FP8 weights or FP32 scales."""
+
+    if policy in {DTypePolicy.AUTO, DTypePolicy.BFLOAT16}:
+        return
+    if policy != DTypePolicy.FLOAT16:
+        raise ValueError(f"unsupported native executable compute dtype: {policy.value}")
+    for parameter in model.parameters():
+        if parameter.dtype == torch.bfloat16:
+            parameter.data = parameter.data.to(dtype=torch.float16)
+    for module in model.modules():
+        for name, buffer in module.named_buffers(recurse=False):
+            if buffer.dtype == torch.bfloat16:
+                setattr(module, name, buffer.to(dtype=torch.float16))
+
+
+__all__ = [
+    "apply_compute_dtype",
+    "replace_submodule",
+    "scaled_fp8_linear_class",
+]

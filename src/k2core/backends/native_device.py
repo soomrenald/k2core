@@ -252,12 +252,21 @@ class NativeDeviceManager:
     def _validate_dtype(self, policy: DTypePolicy, *, usage: str) -> None:
         if policy == DTypePolicy.AUTO:
             return
-        if usage == "compute" and policy == DTypePolicy.FLOAT8_E4M3FN:
+        supported = {
+            "compute": {DTypePolicy.BFLOAT16, DTypePolicy.FLOAT16},
+            "weight": {DTypePolicy.FLOAT8_E4M3FN},
+        }[usage]
+        if policy not in supported:
+            choices = (
+                "auto, bfloat16, or float16"
+                if usage == "compute"
+                else "auto or float8_e4m3fn"
+            )
             raise ConfigurationError(
-                "FP8 is supported for native checkpoint weights, not as a compute dtype.",
+                f"{policy.value} is not an executable native {usage} dtype.",
                 backend_name="native",
                 phase="device_planning",
-                remediation="Choose auto, bfloat16, float16, or float32 compute.",
+                remediation=f"Choose {choices} for native {usage} dtype.",
             )
         attribute = {
             DTypePolicy.BFLOAT16: "bfloat16",

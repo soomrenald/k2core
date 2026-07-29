@@ -259,6 +259,37 @@ class NativeLoadingTests(unittest.TestCase):
                 (("torch.bfloat16", pipeline.transformer.report.tensor_count),),
             )
 
+    def test_fp8_weight_policy_preserves_mixed_checkpoint_lanes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            model, _ = _fixture(Path(directory))
+            with (
+                patch("k2core.backends.native_loading._import_torch", return_value=FakeTorch),
+                patch(
+                    "k2core.backends.native_loading._import_safe_open",
+                    return_value=FakeSafeOpen,
+                ),
+            ):
+                pipeline = NativeModelLoader(
+                    supported_hashes=_supported_hashes(model)
+                ).load(
+                    model,
+                    device_policy=DevicePolicy(
+                        transformer_device="cpu",
+                        text_encoder_device="cpu",
+                        vae_device="cpu",
+                        weight_dtype=DTypePolicy.FLOAT8_E4M3FN,
+                    ),
+                )
+
+            self.assertEqual(
+                dict(pipeline.transformer.report.loaded_dtypes),
+                {
+                    "torch.bfloat16": 30,
+                    "torch.float32": 1,
+                    "torch.float8_e4m3fn": 4,
+                },
+            )
+
     def test_unmapped_key_fails_strict_loading_and_releases_prior_components(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             model, _ = _fixture(Path(directory), rogue_transformer_key=True)

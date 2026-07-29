@@ -9,11 +9,16 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from k2core.backends.native_loading import NativeComponent
-from k2core.backends.native_quant import replace_submodule, scaled_fp8_linear_class
+from k2core.backends.native_quant import (
+    apply_compute_dtype,
+    replace_submodule,
+    scaled_fp8_linear_class,
+)
 from k2core.inference.errors import (
     ConfigurationError,
     WeightMappingError,
 )
+from k2core.inference.schemas import DTypePolicy
 from k2core.model import ArtifactKind
 
 
@@ -152,6 +157,7 @@ def build_krea2_transformer(
     component: NativeComponent,
     *,
     spatial_attention: Any | None = None,
+    compute_dtype: DTypePolicy = DTypePolicy.AUTO,
 ) -> NativeKrea2Transformer:
     """Map the exact reviewed Krea2 checkpoint onto Diffusers' upstream graph."""
 
@@ -243,6 +249,7 @@ def build_krea2_transformer(
                 module.weight.float(),
                 requires_grad=False,
             )
+    apply_compute_dtype(model, torch, compute_dtype)
     model.requires_grad_(False)
     model.eval()
     attention_processor = _repeated_gqa_processor(

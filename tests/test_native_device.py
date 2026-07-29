@@ -148,9 +148,27 @@ class NativeDeviceManagerTests(unittest.TestCase):
             memory_reader=lambda: (8 * 1024**3, 16 * 1024**3),
         )
         self.assertEqual(manager.plan.weight_dtype, "float8_e4m3fn")
-        with self.assertRaisesRegex(ConfigurationError, "not as a compute dtype"):
+        with self.assertRaisesRegex(ConfigurationError, "native weight dtype"):
+            NativeDeviceManager(
+                DevicePolicy(weight_dtype=DTypePolicy.BFLOAT16),
+                torch=FakeTorch(),
+                memory_reader=lambda: (8 * 1024**3, 16 * 1024**3),
+            )
+        fp16 = NativeDeviceManager(
+            DevicePolicy(compute_dtype=DTypePolicy.FLOAT16),
+            torch=FakeTorch(),
+            memory_reader=lambda: (8 * 1024**3, 16 * 1024**3),
+        )
+        self.assertEqual(fp16.plan.compute_dtype, "float16")
+        with self.assertRaisesRegex(ConfigurationError, "not an executable"):
             NativeDeviceManager(
                 DevicePolicy(compute_dtype=DTypePolicy.FLOAT8_E4M3FN),
+                torch=FakeTorch(),
+                memory_reader=lambda: (8 * 1024**3, 16 * 1024**3),
+            )
+        with self.assertRaisesRegex(ConfigurationError, "not an executable"):
+            NativeDeviceManager(
+                DevicePolicy(compute_dtype=DTypePolicy.FLOAT32),
                 torch=FakeTorch(),
                 memory_reader=lambda: (8 * 1024**3, 16 * 1024**3),
             )
@@ -234,6 +252,10 @@ class NativeDeviceManagerTests(unittest.TestCase):
         self.assertIs(result, second)
         self.assertEqual(build.call_args_list[0].kwargs["tiling"], False)
         self.assertEqual(build.call_args_list[1].kwargs["tiling"], True)
+        self.assertEqual(
+            build.call_args_list[0].kwargs["compute_dtype"],
+            DTypePolicy.AUTO,
+        )
         first.unload.assert_called_once_with()
         second.unload.assert_called_once_with()
         self.assertTrue(manager.recovery_summary()["retry_used"])

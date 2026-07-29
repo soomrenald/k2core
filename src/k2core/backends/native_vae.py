@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from k2core.backends.native_loading import NativeComponent
+from k2core.backends.native_quant import apply_compute_dtype
 from k2core.inference.errors import ConfigurationError, WeightMappingError
+from k2core.inference.schemas import DTypePolicy
 from k2core.model import ArtifactKind
 
 
@@ -132,6 +134,7 @@ def build_krea2_vae(
     component: NativeComponent,
     *,
     tiling: bool = False,
+    compute_dtype: DTypePolicy = DTypePolicy.AUTO,
 ) -> NativeKrea2VAE:
     """Map the exact reviewed VAE checkpoint onto Diffusers' upstream graph."""
 
@@ -184,6 +187,7 @@ def build_krea2_vae(
             backend_name="native",
             phase="vae",
         )
+    apply_compute_dtype(model, torch, compute_dtype)
     model.requires_grad_(False)
     model.eval()
     if tiling:

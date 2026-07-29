@@ -315,7 +315,11 @@ class NativeModelLoader:
                         )
                     tensor = source.get_tensor(source_key)
                     source_dtypes[str(tensor.dtype)] += 1
-                    if target_dtype is not None and tensor.is_floating_point():
+                    if (
+                        target_dtype is not None
+                        and dtype_policy != DTypePolicy.FLOAT8_E4M3FN
+                        and tensor.is_floating_point()
+                    ):
                         tensor = tensor.to(dtype=target_dtype)
                     tensors[source_key] = tensor
         except BaseException:

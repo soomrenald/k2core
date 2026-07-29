@@ -325,6 +325,7 @@ class NativeK2Backend:
             transformer = build_krea2_transformer(
                 pipeline.transformer,
                 spatial_attention=attention_override,
+                compute_dtype=config.device_policy.compute_dtype,
             )
 
             def predict(current, sigma):
@@ -734,6 +735,7 @@ class NativeK2Backend:
             transformer = build_krea2_transformer(
                 pipeline.transformer,
                 spatial_attention=attention_override,
+                compute_dtype=config.device_policy.compute_dtype,
             )
 
             def predict(current, sigma):
@@ -985,6 +987,7 @@ class NativeK2Backend:
                 vae = build_krea2_vae(
                     pipeline.vae,
                     tiling=tiling,
+                    compute_dtype=manager.policy.compute_dtype,
                 )
                 return operation(vae)
             except Exception as error:

@@ -138,9 +138,12 @@ class InferenceContractTests(unittest.TestCase):
     ) -> None:
         backend = NativeK2Backend()
         capabilities = backend.capabilities()
-        self.assertEqual(capabilities.modes, frozenset({"text_to_image"}))
+        self.assertEqual(
+            capabilities.modes,
+            frozenset({"text_to_image", "ordinary_lora"}),
+        )
         self.assertTrue(capabilities.metadata["developer_only"])
-        with self.assertRaisesRegex(UnsupportedFeatureError, "LoRAs"):
+        with self.assertRaisesRegex(UnsupportedFeatureError, "regional LoRAs"):
             backend.generate(
                 GenerationRequest(
                     correlation_id="native-unsupported",
@@ -155,6 +158,8 @@ class InferenceContractTests(unittest.TestCase):
                             lora_id="one",
                             name="one",
                             path=Path("/tmp/one.safetensors"),
+                            global_scope=False,
+                            region_ids=("one-region",),
                         ),
                     ),
                 )

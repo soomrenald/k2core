@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Sequence
 
 from k2core.backends import BackendCapabilities
 from k2core.backends.native_loading import NativeModelLoader, NativePipelineState
+from k2core.backends.native_lora import apply_native_loras
 from k2core.backends.native_qwen import build_qwen_text_encoder
 from k2core.backends.native_sampling import (
     DenoisingCheckpoint,
@@ -55,7 +56,7 @@ class NativeK2Backend:
     def capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
             backend_id=self.backend_id,
-            modes=frozenset({"text_to_image"}),
+            modes=frozenset({"text_to_image", "ordinary_lora"}),
             accelerator_vendors=frozenset({"cuda", "rocm"}),
             parameters=(
                 {"name": "sampler", "values": ("euler",)},
@@ -208,6 +209,7 @@ class NativeK2Backend:
             ).to(execution_device)
             sigmas = simple_sigmas(request.steps)
             transformer = build_krea2_transformer(pipeline.transformer)
+            lora_reports = apply_native_loras(transformer, request.loras)
 
             def predict(current, sigma):
                 token.raise_if_cancelled()
@@ -257,7 +259,7 @@ class NativeK2Backend:
             token.raise_if_cancelled()
             emit("vae_decode", fraction=1.0)
 
-            payload = _save_native_image(request, images)
+            payload = _save_native_image(request, images, lora_reports)
             if diagnostic is not None:
                 diagnostic(
                     "Native clean generation complete",
@@ -350,8 +352,8 @@ class NativeK2Backend:
             unsupported.append("partial denoise")
         if request.regions or request.prompt_emphases:
             unsupported.append("regional prompting")
-        if request.loras:
-            unsupported.append("LoRAs")
+        if any(not item.global_scope or item.region_ids for item in request.loras):
+            unsupported.append("regional LoRAs")
         if request.projector_enabled:
             unsupported.append("projector controls")
         if request.post_upscale:
@@ -426,6 +428,7 @@ def _progress_emitter(
 def _save_native_image(
     request: GenerationRequest,
     images: Any,
+    lora_reports: Sequence[Any] = (),
 ) -> dict[str, Any]:
     try:
         from PIL import Image, PngImagePlugin
@@ -467,6 +470,10 @@ def _save_native_image(
     metadata.add_text("sampler", request.sampler)
     metadata.add_text("scheduler", request.scheduler)
     metadata.add_text("cfg", str(request.cfg))
+    metadata.add_text(
+        "loras",
+        json.dumps([report.to_payload() for report in lora_reports]),
+    )
     metadata.add_text("size", f"{image.width}x{image.height}")
     if request.project_json:
         metadata.add_text(
@@ -488,7 +495,7 @@ def _save_native_image(
         "cfg": request.cfg,
         "backend": "native",
         "correlation_id": request.correlation_id,
-        "loras": [],
+        "loras": [report.to_payload() for report in lora_reports],
         "regional_prompting": {"backend": "disabled", "region_count": 0},
         "projector": {"enabled": False, "backend": "disabled"},
         "post_upscale": {"enabled": False, "backend": "disabled", "scale": 1},

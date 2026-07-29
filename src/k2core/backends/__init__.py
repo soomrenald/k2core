@@ -139,6 +139,11 @@ from k2core.backends.native_loading import (  # noqa: E402
     NativeModelLoader,
     NativePipelineState,
 )
+from k2core.backends.native_lora import (  # noqa: E402
+    NativeLoraReport,
+    NativeLoraTarget,
+    apply_native_loras,
+)
 from k2core.backends.native_qwen import (  # noqa: E402
     KREA2_QWEN_TAP_LAYERS,
     KREA2_TEXT_FEATURE_SIZE,
@@ -196,6 +201,8 @@ __all__ += [
     "NativeComponent",
     "NativeComponentConfig",
     "NativeK2Backend",
+    "NativeLoraReport",
+    "NativeLoraTarget",
     "NativeModelLoader",
     "NativePipelineState",
     "NativeQwenTextEncoder",
@@ -205,6 +212,7 @@ __all__ += [
     "build_qwen_text_encoder",
     "build_krea2_transformer",
     "build_krea2_vae",
+    "apply_native_loras",
     "euler_flow_sample",
     "flux_time_shift",
     "load_tokenizer",

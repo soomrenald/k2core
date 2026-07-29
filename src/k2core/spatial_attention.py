@@ -41,11 +41,7 @@ def spatial_pair_bias(
     """Convert a soft spatial field into additive attention-logit values."""
     if not 0.0 <= outside_penalty_ratio <= 1.0:
         raise ValueError("outside penalty ratio must be between zero and one")
-    penalty = (
-        strength * outside_penalty_ratio
-        if outside_penalty is None
-        else outside_penalty
-    )
+    penalty = strength * outside_penalty_ratio if outside_penalty is None else outside_penalty
     if not 0.0 <= penalty <= 10.0:
         raise ValueError("outside penalty must be between zero and ten")
     return tuple((strength + penalty) * weight - penalty for weight in image_token_field)
@@ -77,9 +73,7 @@ class KreaSpatialAttentionOverride:
         self.query_chunk_size = query_chunk_size
         self.lora_delta_adaptation = lora_delta_adaptation
         self.lora_delta_adaptation_gain = lora_delta_adaptation_gain
-        self.expected_sequence_length = (
-            plan.text_token_count + plan.image_token_count
-        )
+        self.expected_sequence_length = plan.text_token_count + plan.image_token_count
         self.matched_calls = 0
         self.text_refiner_calls = 0
         self.text_owners = text_region_ownership(plan)
@@ -114,25 +108,39 @@ class KreaSpatialAttentionOverride:
             return original(*args, **kwargs)
 
         if kwargs.get("mask") is not None:
-            raise RuntimeError(
-                "Krea chunked regional attention requires an unmasked stream"
-            )
+            raise RuntimeError("Krea chunked regional attention requires an unmasked stream")
         if not kwargs.get("skip_reshape", False) or q.ndim != 4:
-            raise RuntimeError(
-                "Krea chunked spatial attention expected head-shaped query tensors"
-            )
+            raise RuntimeError("Krea chunked spatial attention expected head-shaped query tensors")
 
         v = args[2]
         original_head_dim = q.shape[-1]
         scale = float(kwargs.get("scale", original_head_dim**-0.5))
-        output = self._chunked_attention(q, k, v, scale, main_stream=main_stream)
+        output = self.attend(
+            q,
+            k,
+            v,
+            scale=scale,
+            main_stream=main_stream,
+        )
+        if kwargs.get("skip_output_reshape", False):
+            return output
+        return output.transpose(1, 2).reshape(output.shape[0], output.shape[2], -1)
+
+    def attend(self, q, k, v, *, scale: float, main_stream: bool):
+        """Run the shared regional attention math on head-shaped tensors."""
+
+        output = self._chunked_attention(
+            q,
+            k,
+            v,
+            scale,
+            main_stream=main_stream,
+        )
         if main_stream:
             self.matched_calls += 1
         else:
             self.text_refiner_calls += 1
-        if kwargs.get("skip_output_reshape", False):
-            return output
-        return output.transpose(1, 2).reshape(output.shape[0], output.shape[2], -1)
+        return output
 
     def _chunked_attention(self, q, k, v, scale: float, *, main_stream: bool):
         import torch
@@ -149,9 +157,7 @@ class KreaSpatialAttentionOverride:
             scores = torch.matmul(q[:, :, start:end], key_transposed) * scale
             scores = scores.float()
             if main_stream:
-                self._partition_regional_stream(
-                    scores, start, end, text_owners, image_owners
-                )
+                self._partition_regional_stream(scores, start, end, text_owners, image_owners)
                 self._add_spatial_bias(scores, start, end, pair_fields, emphasis_fields)
             else:
                 self._partition_regional_text(scores, start, end, text_owners)
@@ -176,11 +182,7 @@ class KreaSpatialAttentionOverride:
                     self.plan.strength,
                     outside_penalty_ratio=self.outside_penalty_ratio,
                     outside_penalty=self.plan.outside_penalty
-                    * (
-                        1.0
-                        if span.spatial_role in {"subject", "edit"}
-                        else 0.25
-                    ),
+                    * (1.0 if span.spatial_role in {"subject", "edit"} else 0.25),
                 ),
                 dtype=torch.float32,
                 device=device,
@@ -195,12 +197,8 @@ class KreaSpatialAttentionOverride:
             )
             for emphasis in self.plan.emphases
         )
-        text_owners = torch.tensor(
-            self.text_owners, dtype=torch.int16, device=device
-        )
-        image_owners = torch.tensor(
-            self.image_owners, dtype=torch.int16, device=device
-        )
+        text_owners = torch.tensor(self.text_owners, dtype=torch.int16, device=device)
+        image_owners = torch.tensor(self.image_owners, dtype=torch.int16, device=device)
         cached = fields, emphasis_fields, text_owners, image_owners
         self._cache[key] = cached
         return cached
@@ -209,9 +207,7 @@ class KreaSpatialAttentionOverride:
         """Keep subject-owned keys private to that subject in both text stages."""
         self._partition_owned_keys(scores, start, end, text_owners)
 
-    def _partition_regional_stream(
-        self, scores, start, end, text_owners, image_owners
-    ) -> None:
+    def _partition_regional_stream(self, scores, start, end, text_owners, image_owners) -> None:
         """Partition cross-modal subject attention without masking image-to-image."""
         text_count = self.plan.text_token_count
         text_end = min(end, text_count)
@@ -220,33 +216,25 @@ class KreaSpatialAttentionOverride:
             blocked_text = (text_owners.reshape(1, -1) > 0) & (
                 query_text_owners.reshape(-1, 1) != text_owners.reshape(1, -1)
             )
-            scores[
-                :, :, : text_end - start, :text_count
-            ].masked_fill_(
+            scores[:, :, : text_end - start, :text_count].masked_fill_(
                 blocked_text.reshape(1, 1, text_end - start, -1),
                 float("-inf"),
             )
             blocked_images = (image_owners.reshape(1, -1) > 0) & (
                 query_text_owners.reshape(-1, 1) != image_owners.reshape(1, -1)
             )
-            scores[
-                :, :, : text_end - start, text_count:
-            ].masked_fill_(
+            scores[:, :, : text_end - start, text_count:].masked_fill_(
                 blocked_images.reshape(1, 1, text_end - start, -1),
                 float("-inf"),
             )
 
         image_start = max(start, text_count)
         if image_start < end:
-            query_image_owners = image_owners[
-                image_start - text_count : end - text_count
-            ]
+            query_image_owners = image_owners[image_start - text_count : end - text_count]
             blocked_text = (text_owners.reshape(1, -1) > 0) & (
                 query_image_owners.reshape(-1, 1) != text_owners.reshape(1, -1)
             )
-            scores[
-                :, :, image_start - start : end - start, :text_count
-            ].masked_fill_(
+            scores[:, :, image_start - start : end - start, :text_count].masked_fill_(
                 blocked_text.reshape(1, 1, end - image_start, -1),
                 float("-inf"),
             )
@@ -257,9 +245,7 @@ class KreaSpatialAttentionOverride:
         blocked = (owners.reshape(1, -1) > 0) & (
             query_owners.reshape(-1, 1) != owners.reshape(1, -1)
         )
-        scores.masked_fill_(
-            blocked.reshape(1, 1, end - start, -1), float("-inf")
-        )
+        scores.masked_fill_(blocked.reshape(1, 1, end - start, -1), float("-inf"))
 
     def _add_spatial_bias(self, scores, start, end, pair_fields, emphasis_fields) -> None:
         text_count = self.plan.text_token_count
@@ -267,9 +253,7 @@ class KreaSpatialAttentionOverride:
             text_start = max(start, span.start)
             text_end = min(end, span.end)
             if text_start < text_end:
-                scores[
-                    :, :, text_start - start : text_end - start, text_count:
-                ].add_(
+                scores[:, :, text_start - start : text_end - start, text_count:].add_(
                     pair.reshape(1, 1, 1, -1),
                     alpha=self.step_scale * self.region_scales.get(span.region_id, 1.0),
                 )
@@ -277,30 +261,20 @@ class KreaSpatialAttentionOverride:
             image_start = max(start, text_count)
             image_end = end
             if image_start < image_end:
-                image_pair = pair[
-                    image_start - text_count : image_end - text_count
-                ]
-                scores[
-                    :, :, image_start - start : image_end - start, span.start : span.end
-                ].add_(
+                image_pair = pair[image_start - text_count : image_end - text_count]
+                scores[:, :, image_start - start : image_end - start, span.start : span.end].add_(
                     image_pair.reshape(1, 1, -1, 1),
                     alpha=self.step_scale * self.region_scales.get(span.region_id, 1.0),
                 )
-        for emphasis, image_field in zip(
-            self.plan.emphases, emphasis_fields, strict=True
-        ):
+        for emphasis, image_field in zip(self.plan.emphases, emphasis_fields, strict=True):
             text_start = max(start, emphasis.start)
             text_end = min(end, emphasis.end)
             image_start = max(start, text_count)
             image_end = end
             if text_start >= text_end or image_start >= image_end:
                 continue
-            scores[
-                :, :, image_start - start : image_end - start, text_start : text_end
-            ].add_(
-                image_field[
-                    image_start - text_count : image_end - text_count
-                ].reshape(1, 1, -1, 1),
+            scores[:, :, image_start - start : image_end - start, text_start:text_end].add_(
+                image_field[image_start - text_count : image_end - text_count].reshape(1, 1, -1, 1),
                 alpha=self.step_scale * emphasis.strength,
             )
 
@@ -332,6 +306,7 @@ class KreaSpatialAttentionOverride:
 
     def summary(self) -> dict[str, object]:
         return {
+            "main_stream_attention_calls": self.matched_calls,
             "text_refiner_attention_calls": self.text_refiner_calls,
             "text_partition": "subject_keys_private_to_region",
             "subject_box_exclusion": True,
@@ -341,4 +316,3 @@ class KreaSpatialAttentionOverride:
             "lora_delta_adaptation_gain": self.lora_delta_adaptation_gain,
             "final_region_scales": dict(self.region_scales),
         }
-

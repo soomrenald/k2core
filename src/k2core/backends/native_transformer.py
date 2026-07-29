@@ -64,9 +64,7 @@ class NativeKrea2Transformer:
         dtype = self.model.img_in.weight.dtype
 
         if latent.ndim != 5:
-            raise ValueError(
-                "Krea2 latent must have shape (batch, 16, time, height, width)"
-            )
+            raise ValueError("Krea2 latent must have shape (batch, 16, time, height, width)")
         batch, channels, frames, original_height, original_width = latent.shape
         if channels != KREA2_LATENT_CHANNELS:
             raise ValueError(
@@ -76,8 +74,7 @@ class NativeKrea2Transformer:
             raise ValueError("clean Krea2 generation currently requires one latent frame")
         if conditioning.ndim != 3 or conditioning.shape[-1] != KREA2_CONDITIONING_DIM:
             raise ValueError(
-                "Krea2 conditioning must have shape "
-                f"(batch, sequence, {KREA2_CONDITIONING_DIM})"
+                f"Krea2 conditioning must have shape (batch, sequence, {KREA2_CONDITIONING_DIM})"
             )
         if conditioning.shape[0] != batch:
             raise ValueError("latent and conditioning batch sizes do not match")
@@ -100,9 +97,7 @@ class NativeKrea2Transformer:
         prepared_mask = None
         if attention_mask is not None:
             if attention_mask.shape != (batch, text_sequence):
-                raise ValueError(
-                    "attention mask must match the conditioning batch and sequence"
-                )
+                raise ValueError("attention mask must match the conditioning batch and sequence")
             candidate_mask = attention_mask.to(
                 device=resolved_device,
                 dtype=torch.bool,
@@ -155,6 +150,8 @@ class NativeKrea2Transformer:
 
 def build_krea2_transformer(
     component: NativeComponent,
+    *,
+    spatial_attention: Any | None = None,
 ) -> NativeKrea2Transformer:
     """Map the exact reviewed Krea2 checkpoint onto Diffusers' upstream graph."""
 
@@ -220,8 +217,7 @@ def build_krea2_transformer(
         raise WeightMappingError(
             "Krea2 executable state mapping was not strict",
             technical_detail=(
-                f"missing={incompatible.missing_keys}; "
-                f"unexpected={incompatible.unexpected_keys}"
+                f"missing={incompatible.missing_keys}; unexpected={incompatible.unexpected_keys}"
             ),
             backend_name="native",
             phase="transformer",
@@ -252,14 +248,14 @@ def build_krea2_transformer(
     attention_processor = _repeated_gqa_processor(
         functional,
         apply_rotary_emb,
+        spatial_attention=spatial_attention,
     )
     for module in model.modules():
         if module.__class__.__name__ == "Krea2Attention":
             module.set_processor(attention_processor())
 
     full_precision_count = sum(
-        bool(config.get("full_precision_matrix_mult", False))
-        for config in quantization.values()
+        bool(config.get("full_precision_matrix_mult", False)) for config in quantization.values()
     )
     report = Krea2TransformerLoadReport(
         source_tensor_count=len(component.tensors),
@@ -291,7 +287,12 @@ def _import_runtime():
     return torch, functional, nn
 
 
-def _repeated_gqa_processor(functional, apply_rotary_emb):
+def _repeated_gqa_processor(
+    functional,
+    apply_rotary_emb,
+    *,
+    spatial_attention=None,
+):
     class RepeatedGQAAttentionProcessor:
         def __call__(
             self,
@@ -334,19 +335,60 @@ def _repeated_gqa_processor(functional, apply_rotary_emb):
                 repeats = attn.num_heads // attn.num_kv_heads
                 key = key.repeat_interleave(repeats, dim=1)
                 value = value.repeat_interleave(repeats, dim=1)
-            output = functional.scaled_dot_product_attention(
+            regional_stream = _regional_attention_stream(
+                spatial_attention,
                 query,
                 key,
-                value,
-                attn_mask=attention_mask,
-                dropout_p=0.0,
-                is_causal=False,
             )
+            if regional_stream is not None:
+                if attention_mask is not None:
+                    raise RuntimeError("native regional attention requires an unmasked stream")
+                output = spatial_attention.attend(
+                    query,
+                    key,
+                    value,
+                    scale=attn.head_dim**-0.5,
+                    main_stream=regional_stream,
+                )
+            else:
+                output = functional.scaled_dot_product_attention(
+                    query,
+                    key,
+                    value,
+                    attn_mask=attention_mask,
+                    dropout_p=0.0,
+                    is_causal=False,
+                )
             output = output.transpose(1, 2).flatten(2, 3)
             output = output * functional.sigmoid(gate)
             return attn.to_out[0](output)
 
     return RepeatedGQAAttentionProcessor
+
+
+def _regional_attention_stream(spatial_attention, query, key) -> bool | None:
+    if spatial_attention is None:
+        return None
+    query_length = int(query.shape[-2])
+    key_length = int(key.shape[-2])
+    if (
+        query_length == spatial_attention.expected_sequence_length
+        and key_length == spatial_attention.expected_sequence_length
+    ):
+        return True
+    folded_layerwise_text = (
+        query_length == 12
+        and query_length == spatial_attention.plan.text_token_count
+        and int(query.shape[0]) >= spatial_attention.plan.text_token_count
+        and int(query.shape[0]) % spatial_attention.plan.text_token_count == 0
+    )
+    if (
+        query_length == spatial_attention.plan.text_token_count
+        and key_length == spatial_attention.plan.text_token_count
+        and not folded_layerwise_text
+    ):
+        return False
+    return None
 
 
 def _resolve_execution_device(torch, requested: str):
@@ -399,9 +441,7 @@ def _validate_quantization_metadata(
         )
 
     source_scaled = {
-        key.removesuffix(".weight_scale")
-        for key in tensors
-        if key.endswith(".weight_scale")
+        key.removesuffix(".weight_scale") for key in tensors if key.endswith(".weight_scale")
     }
     if set(layers) != source_scaled:
         raise WeightMappingError(
@@ -416,9 +456,7 @@ def _validate_quantization_metadata(
     if len(layers) != KREA2_QUANTIZED_LINEAR_COUNT:
         raise WeightMappingError(
             "Krea2 checkpoint has an unexpected quantized layer count",
-            technical_detail=(
-                f"expected {KREA2_QUANTIZED_LINEAR_COUNT}, got {len(layers)}"
-            ),
+            technical_detail=(f"expected {KREA2_QUANTIZED_LINEAR_COUNT}, got {len(layers)}"),
             backend_name="native",
             phase="transformer",
         )

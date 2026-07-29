@@ -10,6 +10,7 @@ from k2core.backends.native_qwen import (
     _validate_quantization_markers,
     _validate_state_dict_shapes,
 )
+from k2core.backends.native_text import prompt_token_count
 from k2core.inference import WeightMappingError
 
 
@@ -72,9 +73,7 @@ class NativeQwenTests(unittest.TestCase):
         )
 
         with self.assertRaises(WeightMappingError):
-            _validate_quantization_markers(
-                {"model.layers.0.mlp.up_proj.comfy_quant": marker}
-            )
+            _validate_quantization_markers({"model.layers.0.mlp.up_proj.comfy_quant": marker})
 
     def test_shape_validation_rejects_non_strict_mapping(self) -> None:
         _validate_state_dict_shapes(
@@ -86,6 +85,27 @@ class NativeQwenTests(unittest.TestCase):
                 {"weight": FakeTensor((2, 3))},
                 {"weight": FakeTensor((3, 2))},
             )
+
+    def test_native_prompt_token_count_excludes_fixed_wrapper_suffix(self) -> None:
+        class Tokenizer:
+            @staticmethod
+            def encode(_text, *, add_special_tokens):
+                self.assertFalse(add_special_tokens)
+                return [
+                    151644,
+                    1,
+                    151645,
+                    151644,
+                    872,
+                    198,
+                    10,
+                    11,
+                    151645,
+                    198,
+                    151644,
+                ]
+
+        self.assertEqual(prompt_token_count("two tokens", Tokenizer()), 2)
 
 
 if __name__ == "__main__":

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from k2core.backends import ComfyUIBackend, NativeK2Backend
-from k2core.backends.native import _clean_latent_shape
+from k2core.backends.native import (
+    _clean_latent_shape,
+    _compile_native_regional_plan,
+)
 from k2core.inference import (
     BackendInitializationError,
     ConfigurationError,
@@ -20,6 +24,7 @@ from k2core.inference import (
     select_backend,
 )
 from k2core.model import ArtifactSet
+from k2core.regions import PixelBox, RegionDefinition
 
 
 class Runtime:
@@ -133,14 +138,14 @@ class InferenceContractTests(unittest.TestCase):
                 cfg=2.0,
             )
 
-    def test_native_backend_advertises_only_clean_generation_and_rejects_extensions(
+    def test_native_backend_advertises_regional_prompting_and_rejects_regional_loras(
         self,
     ) -> None:
         backend = NativeK2Backend()
         capabilities = backend.capabilities()
         self.assertEqual(
             capabilities.modes,
-            frozenset({"text_to_image", "ordinary_lora"}),
+            frozenset({"text_to_image", "ordinary_lora", "regional_prompting"}),
         )
         self.assertTrue(capabilities.metadata["developer_only"])
         with self.assertRaisesRegex(UnsupportedFeatureError, "regional LoRAs"):
@@ -164,6 +169,45 @@ class InferenceContractTests(unittest.TestCase):
                     ),
                 )
             )
+
+    def test_native_regional_plan_uses_shared_k2core_semantics(self) -> None:
+        request = GenerationRequest(
+            correlation_id="native-regions",
+            prompt="studio scene",
+            width=512,
+            height=256,
+            steps=8,
+            seed=1,
+            regions=(
+                RegionDefinition(
+                    "left",
+                    "Left vessel",
+                    PixelBox(-10, 0, 260, 256),
+                    "a red ceramic vase",
+                    priority=2,
+                    spatial_role="subject",
+                ),
+                RegionDefinition(
+                    "empty",
+                    "Empty",
+                    PixelBox(256, 0, 512, 256),
+                    "",
+                ),
+            ),
+        )
+
+        plan = _compile_native_regional_plan(request)
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(len(plan.regions), 1)
+        self.assertEqual(plan.regions[0].box.x0, 0.0)
+        self.assertEqual(
+            (plan.image_token_width, plan.image_token_height),
+            (32, 16),
+        )
+        self.assertIn("studio scene.", plan.prompt)
+        self.assertIn("a red ceramic vase", plan.prompt)
+        self.assertIsNone(_compile_native_regional_plan(replace(request, regional_prompting=False)))
 
     def test_native_clean_dimensions_map_to_reviewed_five_dimensional_latents(
         self,
@@ -201,9 +245,7 @@ class InferenceContractTests(unittest.TestCase):
         with self.assertRaisesRegex(UnsupportedFeatureError, "simple"):
             backend.generate(GenerationRequest(**base, scheduler="normal"))
         with self.assertRaisesRegex(UnsupportedFeatureError, "negative prompts"):
-            backend.generate(
-                GenerationRequest(**base, negative_prompt="low quality")
-            )
+            backend.generate(GenerationRequest(**base, negative_prompt="low quality"))
         with self.assertRaisesRegex(ConfigurationError, "must be loaded"):
             backend.generate(GenerationRequest(**base))
 

@@ -17,6 +17,7 @@ KREA2_TEMPLATE = (
     "<|im_start|>assistant\n"
 )
 IM_START_TOKEN = 151644
+IM_END_TOKEN = 151645
 USER_TOKEN = 872
 NEWLINE_TOKEN = 198
 
@@ -69,6 +70,16 @@ def tokenize_prompt(prompt: str, tokenizer: Any) -> KreaPromptTokens:
     return KreaPromptTokens(input_ids=encoded, output_start=output_start)
 
 
+def prompt_token_count(prompt: str, tokenizer: Any) -> int:
+    """Count prompt-owned tokens inside Krea's fixed chat wrapper."""
+
+    tokens = tokenize_prompt(prompt, tokenizer)
+    for index in range(tokens.output_start, len(tokens.input_ids)):
+        if tokens.input_ids[index] == IM_END_TOKEN:
+            return index - tokens.output_start
+    raise ValueError("Krea2 prompt template is missing the user <|im_end|> token")
+
+
 def _conditioned_output_start(tokens: tuple[int, ...]) -> int:
     seen = 0
     template_end = -1
@@ -88,5 +99,6 @@ __all__ = [
     "KREA2_TEMPLATE",
     "KreaPromptTokens",
     "load_tokenizer",
+    "prompt_token_count",
     "tokenize_prompt",
 ]

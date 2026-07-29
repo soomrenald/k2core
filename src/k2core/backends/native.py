@@ -17,6 +17,7 @@ from k2core.backends.native_sampling import (
     prepare_noise,
     simple_sigmas,
 )
+from k2core.backends.native_text import prompt_token_count
 from k2core.backends.native_transformer import build_krea2_transformer
 from k2core.backends.native_vae import build_krea2_vae
 from k2core.inference.backend import (
@@ -44,6 +45,11 @@ from k2core.inference.schemas import (
     ProgressEvent,
 )
 from k2core.output import validate_filename_prefix
+from k2core.regional_prompting import (
+    RegionalPromptPlan,
+    compile_regional_prompt_plan,
+)
+from k2core.spatial_attention import KreaSpatialAttentionOverride
 
 
 @dataclass(slots=True)
@@ -56,7 +62,7 @@ class NativeK2Backend:
     def capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
             backend_id=self.backend_id,
-            modes=frozenset({"text_to_image", "ordinary_lora"}),
+            modes=frozenset({"text_to_image", "ordinary_lora", "regional_prompting"}),
             accelerator_vendors=frozenset({"cuda", "rocm"}),
             parameters=(
                 {"name": "sampler", "values": ("euler",)},
@@ -126,9 +132,7 @@ class NativeK2Backend:
             metadata={
                 "model_name": self.pipeline.model_name,
                 "strict_loading": config.strict_loading,
-                "components": tuple(
-                    report.to_payload() for report in self.pipeline.reports()
-                ),
+                "components": tuple(report.to_payload() for report in self.pipeline.reports()),
             },
         )
 
@@ -162,6 +166,12 @@ class NativeK2Backend:
                 )
 
             emit = _progress_emitter(request.correlation_id, progress)
+            regional_plan = _compile_native_regional_plan(request)
+            conditioned_prompt = (
+                regional_plan.prompt
+                if regional_plan is not None and (regional_plan.regions or regional_plan.emphases)
+                else request.prompt
+            )
             if diagnostic is not None:
                 diagnostic(
                     "Native clean generation started",
@@ -184,11 +194,28 @@ class NativeK2Backend:
             try:
                 gpu_work_started = True
                 encoding = text_encoder.encode(
-                    request.prompt,
+                    conditioned_prompt,
                     device=config.device_policy.text_encoder_device,
+                )
+                bound_regional_plan = (
+                    regional_plan.bind_tokens(
+                        lambda prefix: prompt_token_count(
+                            prefix,
+                            text_encoder.tokenizer,
+                        ),
+                        conditioning_text_token_count=len(encoding.tokens.conditioned_ids),
+                    )
+                    if regional_plan is not None
+                    and (regional_plan.regions or regional_plan.emphases)
+                    else None
                 )
             finally:
                 text_encoder.unload()
+            if diagnostic is not None and bound_regional_plan is not None:
+                diagnostic(
+                    "Unified spatial prompt prepared",
+                    bound_regional_plan.summary(),
+                )
             token.raise_if_cancelled()
             emit(
                 "text_encoding",
@@ -208,8 +235,16 @@ class NativeK2Backend:
                 dtype=torch.float32,
             ).to(execution_device)
             sigmas = simple_sigmas(request.steps)
-            transformer = build_krea2_transformer(pipeline.transformer)
-            lora_reports = apply_native_loras(transformer, request.loras)
+            attention_override = (
+                KreaSpatialAttentionOverride(bound_regional_plan)
+                if bound_regional_plan is not None
+                and (bound_regional_plan.spans or bound_regional_plan.emphases)
+                else None
+            )
+            transformer = build_krea2_transformer(
+                pipeline.transformer,
+                spatial_attention=attention_override,
+            )
 
             def predict(current, sigma):
                 token.raise_if_cancelled()
@@ -224,6 +259,11 @@ class NativeK2Backend:
             def checkpoint(item: DenoisingCheckpoint) -> None:
                 token.raise_if_cancelled()
                 completed = item.step + 1
+                if attention_override is not None:
+                    attention_override.set_denoising_progress(
+                        completed,
+                        request.steps,
+                    )
                 emit(
                     "diffusion",
                     step=completed,
@@ -236,6 +276,7 @@ class NativeK2Backend:
                 )
 
             try:
+                lora_reports = apply_native_loras(transformer, request.loras)
                 latent = euler_flow_sample(
                     predict,
                     latent,
@@ -243,6 +284,8 @@ class NativeK2Backend:
                     checkpoint=checkpoint,
                 )
             finally:
+                if attention_override is not None:
+                    attention_override.clear()
                 transformer.unload()
             encoding = None
             token.raise_if_cancelled()
@@ -259,7 +302,23 @@ class NativeK2Backend:
             token.raise_if_cancelled()
             emit("vae_decode", fraction=1.0)
 
-            payload = _save_native_image(request, images, lora_reports)
+            regional_summary = (
+                {
+                    **bound_regional_plan.summary(),
+                    **attention_override.summary(),
+                }
+                if bound_regional_plan is not None and attention_override is not None
+                else {
+                    "backend": "disabled",
+                    "region_count": 0,
+                }
+            )
+            payload = _save_native_image(
+                request,
+                images,
+                lora_reports,
+                regional_summary=regional_summary,
+            )
             if diagnostic is not None:
                 diagnostic(
                     "Native clean generation complete",
@@ -350,8 +409,6 @@ class NativeK2Backend:
             unsupported.append("negative prompts")
         if request.denoise != 1.0:
             unsupported.append("partial denoise")
-        if request.regions or request.prompt_emphases:
-            unsupported.append("regional prompting")
         if any(not item.global_scope or item.region_ids for item in request.loras):
             unsupported.append("regional LoRAs")
         if request.projector_enabled:
@@ -360,9 +417,7 @@ class NativeK2Backend:
             unsupported.append("post-upscale")
         if unsupported:
             raise UnsupportedFeatureError(
-                "Native clean generation does not yet support: "
-                + ", ".join(unsupported)
-                + ".",
+                "Native clean generation does not yet support: " + ", ".join(unsupported) + ".",
                 backend_name=self.backend_id,
                 phase="generation",
                 correlation_id=request.correlation_id,
@@ -392,10 +447,28 @@ def _execution_device(torch, requested: str):
 
 def _clean_latent_shape(width: int, height: int) -> tuple[int, int, int, int, int]:
     if width <= 0 or height <= 0 or width % 16 or height % 16:
-        raise ValueError(
-            "native clean dimensions must be positive multiples of 16"
-        )
+        raise ValueError("native clean dimensions must be positive multiples of 16")
     return (1, 16, 1, height // 8, width // 8)
+
+
+def _compile_native_regional_plan(
+    request: GenerationRequest,
+) -> RegionalPromptPlan | None:
+    if not request.regional_prompting or not (request.regions or request.prompt_emphases):
+        return None
+    return compile_regional_prompt_plan(
+        request.width,
+        request.height,
+        request.prompt,
+        request.regions,
+        strength=request.regional_prompt_strength,
+        outside_penalty=request.regional_outside_penalty,
+        falloff_pixels=request.regional_feather_pixels,
+        subject_competition=request.regional_subject_competition,
+        subject_fill=request.regional_subject_fill,
+        late_step_scale=request.regional_late_step_scale,
+        emphases=request.prompt_emphases,
+    )
 
 
 def _progress_emitter(
@@ -429,6 +502,8 @@ def _save_native_image(
     request: GenerationRequest,
     images: Any,
     lora_reports: Sequence[Any] = (),
+    *,
+    regional_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     try:
         from PIL import Image, PngImagePlugin
@@ -441,19 +516,20 @@ def _save_native_image(
         ) from error
 
     if images.ndim != 4 or images.shape[0] != 1 or images.shape[1] != 3:
-        raise RuntimeError(
-            "native VAE returned an unexpected image shape: "
-            f"{tuple(images.shape)}"
-        )
+        raise RuntimeError(f"native VAE returned an unexpected image shape: {tuple(images.shape)}")
     array = (
-        images[0]
-        .detach()
-        .permute(1, 2, 0)
-        .to(device="cpu", dtype=_import_torch().float32)
-        .clamp(0, 1)
-        .numpy()
-        * 255.0
-    ).round().astype("uint8")
+        (
+            images[0]
+            .detach()
+            .permute(1, 2, 0)
+            .to(device="cpu", dtype=_import_torch().float32)
+            .clamp(0, 1)
+            .numpy()
+            * 255.0
+        )
+        .round()
+        .astype("uint8")
+    )
     image = Image.fromarray(array, mode="RGB")
     output_directory = request.output_directory.expanduser().resolve()
     output_directory.mkdir(parents=True, exist_ok=True)
@@ -473,6 +549,13 @@ def _save_native_image(
     metadata.add_text(
         "loras",
         json.dumps([report.to_payload() for report in lora_reports]),
+    )
+    metadata.add_text(
+        "regional_prompting",
+        json.dumps(
+            regional_summary or {"backend": "disabled", "region_count": 0},
+            separators=(",", ":"),
+        ),
     )
     metadata.add_text("size", f"{image.width}x{image.height}")
     if request.project_json:
@@ -496,7 +579,7 @@ def _save_native_image(
         "backend": "native",
         "correlation_id": request.correlation_id,
         "loras": [report.to_payload() for report in lora_reports],
-        "regional_prompting": {"backend": "disabled", "region_count": 0},
+        "regional_prompting": regional_summary or {"backend": "disabled", "region_count": 0},
         "projector": {"enabled": False, "backend": "disabled"},
         "post_upscale": {"enabled": False, "backend": "disabled", "scale": 1},
     }

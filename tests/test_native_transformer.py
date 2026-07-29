@@ -8,6 +8,7 @@ from k2core.backends.native_transformer import (
     KREA2_QUANTIZED_LINEAR_COUNT,
     _map_linear_module,
     _map_transformer_key,
+    _regional_attention_stream,
     _transformer_state_dict,
     _validate_quantization_metadata,
 )
@@ -31,9 +32,7 @@ class NativeTransformerMappingTests(unittest.TestCase):
         expected = {
             "blocks.3.mod.lin": "transformer_blocks.3.scale_shift_table",
             "blocks.3.prenorm.scale": "transformer_blocks.3.norm1.weight",
-            "blocks.3.attn.qknorm.knorm.scale": (
-                "transformer_blocks.3.attn.norm_k.weight"
-            ),
+            "blocks.3.attn.qknorm.knorm.scale": ("transformer_blocks.3.attn.norm_k.weight"),
             "txtfusion.layerwise_blocks.0.postnorm.scale": (
                 "text_fusion.layerwise_blocks.0.norm2.weight"
             ),
@@ -63,16 +62,18 @@ class NativeTransformerMappingTests(unittest.TestCase):
 
     def test_quantization_metadata_must_match_all_scale_tensors(self) -> None:
         layers = {
-            f"blocks.{index // 8}.{(
-                'attn.wq',
-                'attn.wk',
-                'attn.wv',
-                'attn.wo',
-                'attn.gate',
-                'mlp.gate',
-                'mlp.up',
-                'mlp.down',
-            )[index % 8]}": {"format": "float8_e4m3fn"}
+            f"blocks.{index // 8}.{
+                (
+                    'attn.wq',
+                    'attn.wk',
+                    'attn.wv',
+                    'attn.wo',
+                    'attn.gate',
+                    'mlp.gate',
+                    'mlp.up',
+                    'mlp.down',
+                )[index % 8]
+            }": {"format": "float8_e4m3fn"}
             for index in range(28 * 8)
         }
         for group in ("layerwise_blocks", "refiner_blocks"):
@@ -87,9 +88,7 @@ class NativeTransformerMappingTests(unittest.TestCase):
                     "mlp.up",
                     "mlp.down",
                 ):
-                    layers[f"txtfusion.{group}.{block}.{name}"] = {
-                        "format": "float8_e4m3fn"
-                    }
+                    layers[f"txtfusion.{group}.{block}.{name}"] = {"format": "float8_e4m3fn"}
         tensors = {f"{name}.weight_scale": object() for name in layers}
         mapped = _validate_quantization_metadata(
             {"_quantization_metadata": json.dumps({"layers": layers})},
@@ -103,6 +102,41 @@ class NativeTransformerMappingTests(unittest.TestCase):
                 {"_quantization_metadata": json.dumps({"layers": layers})},
                 tensors,
             )
+
+    def test_regional_attention_selects_only_main_and_refiner_streams(self) -> None:
+        class Shape:
+            def __init__(self, *values):
+                self.shape = values
+
+        class Plan:
+            text_token_count = 20
+
+        class Spatial:
+            plan = Plan()
+            expected_sequence_length = 1044
+
+        spatial = Spatial()
+        self.assertTrue(
+            _regional_attention_stream(
+                spatial,
+                Shape(1, 24, 1044, 128),
+                Shape(1, 24, 1044, 128),
+            )
+        )
+        self.assertFalse(
+            _regional_attention_stream(
+                spatial,
+                Shape(1, 24, 20, 128),
+                Shape(1, 24, 20, 128),
+            )
+        )
+        self.assertIsNone(
+            _regional_attention_stream(
+                spatial,
+                Shape(20, 24, 12, 128),
+                Shape(20, 24, 12, 128),
+            )
+        )
 
 
 if __name__ == "__main__":

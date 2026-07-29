@@ -560,6 +560,130 @@ class RegionalPromptingTests(unittest.TestCase):
             PixelBox(100.0, 100.0, 600.0, 300.0),
         )
 
+    def test_gate7_region_geometry_matrix(self) -> None:
+        cases = {
+            "one": (
+                128,
+                128,
+                (
+                    RegionDefinition(
+                        "one",
+                        "One",
+                        PixelBox(16, 16, 112, 112),
+                        "red vase",
+                    ),
+                ),
+            ),
+            "non_overlapping": (
+                128,
+                64,
+                (
+                    RegionDefinition(
+                        "left",
+                        "Left",
+                        PixelBox(0, 0, 64, 64),
+                        "red vase",
+                    ),
+                    RegionDefinition(
+                        "right",
+                        "Right",
+                        PixelBox(64, 0, 128, 64),
+                        "blue vase",
+                    ),
+                ),
+            ),
+            "overlapping": (
+                128,
+                128,
+                (
+                    RegionDefinition(
+                        "front",
+                        "Front",
+                        PixelBox(8, 8, 88, 112),
+                        "red vase",
+                        priority=2,
+                    ),
+                    RegionDefinition(
+                        "behind",
+                        "Behind",
+                        PixelBox(48, 16, 120, 120),
+                        "blue vase",
+                        priority=1,
+                    ),
+                ),
+            ),
+            "full_canvas": (
+                128,
+                80,
+                (
+                    RegionDefinition(
+                        "background",
+                        "Background",
+                        PixelBox(0, 0, 128, 80),
+                        "white studio",
+                    ),
+                ),
+            ),
+            "very_small": (
+                128,
+                128,
+                (
+                    RegionDefinition(
+                        "small",
+                        "Small",
+                        PixelBox(63.5, 63.5, 64.5, 64.5),
+                        "tiny bead",
+                    ),
+                ),
+            ),
+            "portrait": (
+                96,
+                160,
+                (
+                    RegionDefinition(
+                        "portrait",
+                        "Portrait",
+                        PixelBox(8, 16, 88, 144),
+                        "standing vase",
+                    ),
+                ),
+            ),
+        }
+        for name, (width, height, regions) in cases.items():
+            with self.subTest(name=name):
+                plan = compile_regional_prompt_plan(
+                    width,
+                    height,
+                    "studio",
+                    regions,
+                )
+                self.assertEqual(
+                    plan.image_token_count,
+                    (width // 16) * (height // 16),
+                )
+                self.assertEqual(len(plan.regions), len(regions))
+                self.assertTrue(
+                    all(
+                        any(weight > 0.0 for weight in region.image_token_mask)
+                        for region in plan.regions
+                    )
+                )
+
+        with self.assertRaisesRegex(ValueError, "does not overlap"):
+            compile_regional_prompt_plan(
+                128,
+                128,
+                "studio",
+                (
+                    RegionDefinition(
+                        "outside",
+                        "Outside",
+                        PixelBox(140, 140, 150, 150),
+                        "invalid vase",
+                    ),
+                ),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

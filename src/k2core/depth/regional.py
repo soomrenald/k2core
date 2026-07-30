@@ -122,3 +122,44 @@ def compose_effective_depth_field(
         image_token_values=tokens,
         region_multipliers=multipliers,
     )
+
+
+def compose_override_depth(
+    global_depth: np.ndarray,
+    regions: tuple[DepthRegion, ...],
+    override_depths: Mapping[str, np.ndarray],
+    *,
+    feather_pixels: float,
+) -> np.ndarray:
+    result = np.asarray(global_depth, dtype=np.float32).copy()
+    if result.ndim != 2 or not np.isfinite(result).all():
+        raise ValueError("global override depth must be a finite 2D field")
+    expected = {
+        region.settings.region_id
+        for region in regions
+        if region.settings.mode == DepthRegionMode.OVERRIDE
+    }
+    if set(override_depths) != expected:
+        raise ValueError("override depth images do not match override-mode regions")
+    indexed = list(enumerate(regions))
+    ordered = sorted(indexed, key=lambda item: (item[1].priority, -item[0]))
+    height, width = result.shape
+    for _index, region in ordered:
+        if region.settings.mode != DepthRegionMode.OVERRIDE:
+            continue
+        override = np.asarray(
+            override_depths[region.settings.region_id],
+            dtype=np.float32,
+        )
+        if override.shape != result.shape or not np.isfinite(override).all():
+            raise ValueError("override depth must match the normalized global depth shape")
+        alpha = feathered_box_mask(
+            width,
+            height,
+            region.box,
+            feather_pixels,
+        )
+        result = result * (1.0 - alpha) + override * alpha
+    result = np.ascontiguousarray(np.clip(result, 0.0, 1.0), dtype=np.float32)
+    result.setflags(write=False)
+    return result

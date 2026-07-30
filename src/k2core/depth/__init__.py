@@ -33,6 +33,7 @@ from k2core.depth.regional import (
     DepthRegion,
     EffectiveDepthField,
     compose_effective_depth_field,
+    compose_override_depth,
 )
 from k2core.depth.types import (
     DepthImage,
@@ -67,6 +68,7 @@ __all__ = [
     "NormalizedDepth",
     "block_average_mask",
     "compose_effective_depth_field",
+    "compose_override_depth",
     "depth_histogram",
     "depth_preview",
     "depth_summary",

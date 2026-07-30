@@ -77,11 +77,7 @@ def normalize_depth(
         normalized = 1.0 - normalized
     normalized = np.power(normalized, config.gamma)
     if invalid_count:
-        replacement = (
-            0.0
-            if config.invalid_value_policy == DepthInvalidValuePolicy.FAR
-            else 1.0
-        )
+        replacement = 0.0 if config.invalid_value_policy == DepthInvalidValuePolicy.FAR else 1.0
         normalized[~finite] = replacement
     output = np.asarray(normalized, dtype=np.float32)
     report = DepthPreprocessReport(

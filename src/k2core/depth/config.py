@@ -24,17 +24,13 @@ class DepthFeatureFlags:
     blender_bundle_import: bool = False
 
     @classmethod
-    def from_environment(
-        cls, environment: Mapping[str, str] | None = None
-    ) -> "DepthFeatureFlags":
+    def from_environment(cls, environment: Mapping[str, str] | None = None) -> "DepthFeatureFlags":
         values = os.environ if environment is None else environment
         return cls(
             control=_environment_flag(values, "K2_DEPTH_CONTROL_ENABLED"),
             regions=_environment_flag(values, "K2_DEPTH_REGIONS_ENABLED"),
             override=_environment_flag(values, "K2_DEPTH_OVERRIDE_ENABLED"),
-            blender_bundle_import=_environment_flag(
-                values, "K2_BLENDER_BUNDLE_IMPORT_ENABLED"
-            ),
+            blender_bundle_import=_environment_flag(values, "K2_BLENDER_BUNDLE_IMPORT_ENABLED"),
         )
 
     def document(self) -> dict[str, bool]:
@@ -84,9 +80,7 @@ class DepthNormalizationSettings:
                 or self.checkpoint_maximum is None
                 or self.checkpoint_maximum <= self.checkpoint_minimum
             ):
-                raise ValueError(
-                    "checkpoint-reference normalization requires minimum < maximum"
-                )
+                raise ValueError("checkpoint-reference normalization requires minimum < maximum")
 
     @classmethod
     def from_payload(
@@ -101,24 +95,16 @@ class DepthNormalizationSettings:
             near_percentile=float(
                 values.get("near_percentile", values.get("percentile_near", 1.0))
             ),
-            far_percentile=float(
-                values.get("far_percentile", values.get("percentile_far", 99.0))
-            ),
+            far_percentile=float(values.get("far_percentile", values.get("percentile_far", 99.0))),
             gamma=float(values.get("gamma", 1.0)),
             clamp=bool(values.get("clamp", True)),
             invert=bool(values.get("invert", False) if invert is None else invert),
-            invalid_value_policy=DepthInvalidValuePolicy(
-                values.get("invalid_value_policy", "far")
-            ),
+            invalid_value_policy=DepthInvalidValuePolicy(values.get("invalid_value_policy", "far")),
             camera_near=(
-                float(values["camera_near"])
-                if values.get("camera_near") is not None
-                else None
+                float(values["camera_near"]) if values.get("camera_near") is not None else None
             ),
             camera_far=(
-                float(values["camera_far"])
-                if values.get("camera_far") is not None
-                else None
+                float(values["camera_far"]) if values.get("camera_far") is not None else None
             ),
             checkpoint_minimum=(
                 float(values["checkpoint_minimum"])
@@ -191,9 +177,7 @@ class DepthControlSettings:
     global_strength: float = 1.0
     start_percent: float = 0.0
     end_percent: float = 1.0
-    normalization: DepthNormalizationSettings = field(
-        default_factory=DepthNormalizationSettings
-    )
+    normalization: DepthNormalizationSettings = field(default_factory=DepthNormalizationSettings)
     feather_pixels: float = 32.0
     minimum_effective_strength: float = 0.0
     maximum_effective_strength: float = 3.0
@@ -202,8 +186,10 @@ class DepthControlSettings:
     def __post_init__(self) -> None:
         if not 0.0 <= self.minimum_effective_strength < self.maximum_effective_strength:
             raise ValueError("effective depth bounds must satisfy 0 <= minimum < maximum")
-        if not self.minimum_effective_strength <= self.global_strength <= (
-            self.maximum_effective_strength
+        if (
+            not self.minimum_effective_strength
+            <= self.global_strength
+            <= (self.maximum_effective_strength)
         ):
             raise ValueError("global depth strength is outside the configured safe bounds")
         if not 0.0 <= self.start_percent <= self.end_percent <= 1.0:
@@ -228,26 +214,18 @@ class DepthControlSettings:
         return cls(
             enabled=bool(values.get("enabled", False)),
             checkpoint=(
-                Path(str(values["checkpoint"])).expanduser()
-                if values.get("checkpoint")
-                else None
+                Path(str(values["checkpoint"])).expanduser() if values.get("checkpoint") else None
             ),
             depth_image=(
-                Path(str(values["depth_image"])).expanduser()
-                if values.get("depth_image")
-                else None
+                Path(str(values["depth_image"])).expanduser() if values.get("depth_image") else None
             ),
             global_strength=float(values.get("global_strength", 1.0)),
             start_percent=float(values.get("start_percent", 0.0)),
             end_percent=float(values.get("end_percent", 1.0)),
             normalization=normalization,
             feather_pixels=float(values.get("feather_pixels", 32.0)),
-            minimum_effective_strength=float(
-                values.get("minimum_effective_strength", 0.0)
-            ),
-            maximum_effective_strength=float(
-                values.get("maximum_effective_strength", 3.0)
-            ),
+            minimum_effective_strength=float(values.get("minimum_effective_strength", 0.0)),
+            maximum_effective_strength=float(values.get("maximum_effective_strength", 3.0)),
             regions=tuple(
                 DepthRegionSettings(
                     region_id=str(region["region_id"]),

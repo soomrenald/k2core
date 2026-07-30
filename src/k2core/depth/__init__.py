@@ -10,6 +10,10 @@ from k2core.depth.checkpoint import (
     inspect_depth_checkpoint,
     lora_pairs,
 )
+from k2core.depth.blender_bundle import (
+    BlenderDepthBundle,
+    load_blender_depth_bundle,
+)
 from k2core.depth.config import (
     DepthControlSettings,
     DepthFeatureFlags,
@@ -47,6 +51,7 @@ __all__ = [
     "KREA2_DEPTH_PUBLIC_SHA256",
     "DepthCheckpointCompatibility",
     "DepthCheckpointInfo",
+    "BlenderDepthBundle",
     "DepthControlSettings",
     "DepthFeatureFlags",
     "DepthImage",
@@ -68,6 +73,7 @@ __all__ = [
     "feathered_box_mask",
     "inspect_depth_checkpoint",
     "lora_pairs",
+    "load_blender_depth_bundle",
     "load_depth_image",
     "normalize_depth",
     "resize_depth",

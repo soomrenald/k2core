@@ -84,9 +84,7 @@ def compose_effective_depth_field(
     if set(supplied_ids) != set(configured):
         missing = sorted(set(configured) - set(supplied_ids))
         unknown = sorted(set(supplied_ids) - set(configured))
-        raise ValueError(
-            f"depth region geometry mismatch; missing={missing}, unknown={unknown}"
-        )
+        raise ValueError(f"depth region geometry mismatch; missing={missing}, unknown={unknown}")
     global_active = settings.start_percent <= progress <= settings.end_percent
     base = settings.global_strength if global_active else 0.0
     multiplier_field = np.ones((height, width), dtype=np.float32)
@@ -100,9 +98,7 @@ def compose_effective_depth_field(
     for _index, region in ordered:
         config = configured[region.settings.region_id]
         if config != region.settings:
-            raise ValueError(
-                f"depth settings disagree for region {region.settings.region_id!r}"
-            )
+            raise ValueError(f"depth settings disagree for region {region.settings.region_id!r}")
         if config.mode == DepthRegionMode.OVERRIDE and not allow_override:
             raise ValueError("override depth mode is disabled by the active feature flags")
         multiplier = _active_multiplier(config, progress)

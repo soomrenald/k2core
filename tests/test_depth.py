@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +24,7 @@ from k2core.depth import (
     depth_preview,
     feathered_box_mask,
     load_depth_image,
+    load_blender_depth_bundle,
     normalize_depth,
     inspect_depth_checkpoint,
     resize_depth,
@@ -141,6 +144,56 @@ def test_loads_8_bit_png_and_builds_preview(tmp_path: Path) -> None:
     assert depth.info.maximum == 255
     assert np.array_equal(depth.values, source)
     assert np.array_equal(np.asarray(depth_preview(depth)), source)
+
+
+def test_loads_verified_blender_depth_bundle(tmp_path: Path) -> None:
+    depth_path = tmp_path / "depth_16bit.png"
+    Image.fromarray(np.array([[0, 1024], [32000, 65535]], dtype=np.uint16)).save(depth_path)
+    checksum = hashlib.sha256(depth_path.read_bytes()).hexdigest()
+    (tmp_path / "camera.json").write_text(
+        json.dumps(
+            {
+                "resolution": [2, 2],
+                "depth_convention": "near_white_far_black",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "objects.json").write_text(
+        json.dumps({"objects": [{"name": "mannequin_001"}]}),
+        encoding="utf-8",
+    )
+    (tmp_path / "export.json").write_text(
+        json.dumps(
+            {
+                "format": "k2lab-blender-depth-bundle",
+                "version": 1,
+                "depth_image": depth_path.name,
+                "checksums": {depth_path.name: checksum},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = load_blender_depth_bundle(tmp_path)
+
+    assert bundle.depth.info.bit_depth == 16
+    assert bundle.camera["depth_convention"] == "near_white_far_black"
+    assert bundle.objects[0]["name"] == "mannequin_001"
+
+    (tmp_path / "export.json").write_text(
+        json.dumps(
+            {
+                "format": "k2lab-blender-depth-bundle",
+                "version": 1,
+                "depth_image": depth_path.name,
+                "checksums": {depth_path.name: "0" * 64},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="checksum"):
+        load_blender_depth_bundle(tmp_path)
 
 
 def test_loads_16_bit_png_without_truncation(tmp_path: Path) -> None:

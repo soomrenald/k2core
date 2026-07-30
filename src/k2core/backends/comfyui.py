@@ -45,6 +45,9 @@ class ComfyUIBackend:
                     "text_to_image",
                     "image_edit",
                     "face_refinement",
+                    "ordinary_lora",
+                    "post_upscale",
+                    "projector",
                     "regional_prompting",
                     "regional_lora",
                 }

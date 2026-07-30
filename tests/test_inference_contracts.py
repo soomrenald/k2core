@@ -185,6 +185,25 @@ class InferenceContractTests(unittest.TestCase):
             )
         )
 
+    def test_comfyui_backend_advertises_all_production_ui_modes(self) -> None:
+        capabilities = ComfyUIBackend(Runtime()).capabilities()
+
+        self.assertEqual(
+            capabilities.modes,
+            frozenset(
+                {
+                    "text_to_image",
+                    "image_edit",
+                    "face_refinement",
+                    "ordinary_lora",
+                    "post_upscale",
+                    "projector",
+                    "regional_prompting",
+                    "regional_lora",
+                }
+            ),
+        )
+
     def test_native_regional_plan_uses_shared_k2core_semantics(self) -> None:
         request = GenerationRequest(
             correlation_id="native-regions",

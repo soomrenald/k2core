@@ -20,6 +20,7 @@ from k2core.depth import (
     DepthRegionSettings,
     block_average_mask,
     compose_effective_depth_field,
+    compose_override_depth,
     depth_histogram,
     depth_preview,
     feathered_box_mask,
@@ -377,6 +378,35 @@ def test_regional_depth_priority_and_ignore_are_deterministic() -> None:
     assert np.all(field.pixel_values[:, :16] == 0.0)
     assert np.all(field.pixel_values[:, 16:] == 1.0)
     assert np.array_equal(field.image_token_values, [[0.0, 1.0]])
+
+
+def test_override_depth_blends_through_feathered_priority_masks() -> None:
+    low = DepthRegionSettings(
+        "low",
+        DepthRegionMode.OVERRIDE,
+        override_image=Path("low.png"),
+    )
+    high = DepthRegionSettings(
+        "high",
+        DepthRegionMode.OVERRIDE,
+        override_image=Path("high.png"),
+    )
+    regions = (
+        DepthRegion(low, PixelBox(0, 0, 8, 8), priority=0),
+        DepthRegion(high, PixelBox(2, 2, 6, 6), priority=10),
+    )
+    result = compose_override_depth(
+        np.full((8, 8), 0.5, dtype=np.float32),
+        regions,
+        {
+            "low": np.zeros((8, 8), dtype=np.float32),
+            "high": np.ones((8, 8), dtype=np.float32),
+        },
+        feather_pixels=0,
+    )
+    assert result[0, 0] == 0.0
+    assert result[3, 3] == 1.0
+    assert not result.flags.writeable
 
 
 def test_regional_depth_weighted_overlap_and_clamping() -> None:

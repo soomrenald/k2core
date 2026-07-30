@@ -26,3 +26,7 @@ The first extracted slice is `k2core.regions`, copied from the matching K2Lab
 desktop and RunPod implementations after verifying that those implementations
 were identical.
 
+## License
+
+K2 Core is licensed under the Apache License 2.0. Model weights and other
+user-supplied assets retain their own terms; see `THIRD_PARTY_NOTICES.md`.

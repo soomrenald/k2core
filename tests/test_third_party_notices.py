@@ -8,7 +8,7 @@ ROOT = Path(__file__).parents[1]
 
 
 class ThirdPartyNoticeTests(unittest.TestCase):
-    def test_notice_records_dependencies_and_open_license_boundary(self) -> None:
+    def test_notice_records_dependencies_and_license_boundary(self) -> None:
         notice = (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
 
         for dependency in (
@@ -21,4 +21,5 @@ class ThirdPartyNoticeTests(unittest.TestCase):
         ):
             self.assertIn(dependency, notice)
         self.assertIn("No ComfyUI source is copied or vendored", notice)
-        self.assertIn("no declared first-party project license", notice)
+        self.assertIn("licensed under Apache-2.0", notice)
+        self.assertIn("does not grant rights", notice)

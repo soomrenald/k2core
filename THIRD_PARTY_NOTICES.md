@@ -1,6 +1,6 @@
 # Third-party notices
 
-Last reviewed: 2026-07-29
+Last reviewed: 2026-07-30
 
 This file records the third-party software boundaries of `k2core`. It is an engineering
 inventory, not a legal opinion or a replacement for upstream license texts.
@@ -28,11 +28,11 @@ This repository does not include or grant rights to Krea, Qwen, LoRA, detector, 
 upscaler weights. A consumer that downloads or bundles such assets must review and
 preserve each model's separate license, attribution, and redistribution terms.
 
-## Open release blocker
+## First-party license
 
-`k2core` currently has no declared first-party project license. The copyright owner
-must select and add one before public redistribution. Until then, this notice must not
-be read as granting rights to the `k2core` source itself.
+The `k2core` source is licensed under Apache-2.0; see `LICENSE`. That license covers
+first-party software only. It does not grant rights to the separately supplied model
+weights or other user assets described above.
 
 Before distribution, generate a complete bill of materials from the final environment
 and include every dependency's license and required notice files.

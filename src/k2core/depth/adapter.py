@@ -4,7 +4,6 @@ import hashlib
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any, Mapping
 
 import numpy as np

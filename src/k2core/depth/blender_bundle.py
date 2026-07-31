@@ -55,7 +55,10 @@ def load_blender_depth_bundle(path: Path) -> BlenderDepthBundle:
     manifest = _json_object(root / "export.json")
     camera = _json_object(root / "camera.json")
     objects_document = _json_object(root / "objects.json")
-    if manifest.get("format") != "k2lab-blender-depth-bundle":
+    if manifest.get("format") not in {
+        "k2pose-blender-depth-bundle",
+        "k2lab-blender-depth-bundle",
+    }:
         raise ValueError("unsupported Blender depth bundle format")
     if int(manifest.get("version", 0)) != 1:
         raise ValueError("unsupported Blender depth bundle version")

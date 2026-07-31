@@ -197,6 +197,35 @@ def test_loads_verified_blender_depth_bundle(tmp_path: Path) -> None:
         load_blender_depth_bundle(tmp_path)
 
 
+def test_loads_k2pose_blender_depth_bundle_format(tmp_path: Path) -> None:
+    depth_path = tmp_path / "depth_16bit.png"
+    Image.fromarray(np.array([[0, 1024], [32000, 65535]], dtype=np.uint16)).save(depth_path)
+    checksum = hashlib.sha256(depth_path.read_bytes()).hexdigest()
+    (tmp_path / "camera.json").write_text(
+        json.dumps(
+            {
+                "resolution": [2, 2],
+                "depth_convention": "near_white_far_black",
+                "origin": "top_left",
+                "vertical_flip": False,
+            }
+        )
+    )
+    (tmp_path / "objects.json").write_text(json.dumps({"objects": []}))
+    (tmp_path / "export.json").write_text(
+        json.dumps(
+            {
+                "format": "k2pose-blender-depth-bundle",
+                "version": 1,
+                "depth_image": depth_path.name,
+                "checksums": {depth_path.name: checksum},
+            }
+        )
+    )
+
+    assert load_blender_depth_bundle(tmp_path).depth.info.bit_depth == 16
+
+
 def test_loads_16_bit_png_without_truncation(tmp_path: Path) -> None:
     path = tmp_path / "depth16.png"
     source = np.array([[0, 257], [32768, 65535]], dtype=np.uint16)

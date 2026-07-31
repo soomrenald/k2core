@@ -648,6 +648,7 @@ class RegionalLoraRoutingTests(unittest.TestCase):
                 "unload",
                 "remove:k2_routed_loras",
                 "remove:k2_projector_delta",
+                "remove:k2_krea_depth_control_lora",
                 "empty:True",
             ],
         )

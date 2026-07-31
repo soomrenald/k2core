@@ -13,6 +13,14 @@ from typing import Any, Callable
 
 from k2core import __version__ as k2core_version
 from k2core.config import ModelDirectories
+from k2core.depth import (
+    DepthControlPreparation,
+    attach_depth_control,
+    clear_depth_control,
+    depth_adapter_runtime_report,
+    encode_depth_control,
+    install_depth_adapter,
+)
 from k2core.image_edit import (
     composite_regional_edit,
     edge_pad_to_krea,
@@ -1197,6 +1205,7 @@ class ComfyBaselineRuntime:
         comfy.model_management.unload_all_models()
         generation_model.remove_injections("k2_routed_loras")
         generation_model.remove_injections("k2_projector_delta")
+        generation_model.remove_injections("k2_krea_depth_control_lora")
         gc.collect()
         comfy.model_management.soft_empty_cache(force=True)
 
@@ -1449,6 +1458,7 @@ class ComfyBaselineRuntime:
         width: int,
         height: int,
         steps: int,
+        cfg: float = 1.0,
         sampler: str = DEFAULT_SAMPLER,
         scheduler: str = DEFAULT_SCHEDULER,
         seed: int,
@@ -1465,6 +1475,7 @@ class ComfyBaselineRuntime:
         regional_late_step_scale: float = 0.35,
         regional_lora_delta_adaptation: bool = False,
         regional_lora_delta_adaptation_gain: float = 0.35,
+        depth_control: DepthControlPreparation | None = None,
         projector_enabled: bool = False,
         projector_preset: str = DEFAULT_PROJECTOR_PRESET,
         projector_values: tuple[float, ...] = (),
@@ -1485,6 +1496,13 @@ class ComfyBaselineRuntime:
             raise ValueError("baseline dimensions must be positive multiples of 16")
         if not 1 <= steps <= 100:
             raise ValueError("steps must be between 1 and 100")
+        if not 0.0 <= cfg <= 20.0:
+            raise ValueError("CFG must be between zero and 20")
+        if (
+            depth_control is not None
+            and depth_control.schedule.transition_count != steps
+        ):
+            raise ValueError("depth preparation and generation step counts must match")
         sampler = validate_sampler(sampler)
         scheduler = validate_scheduler(scheduler)
         if not 0.0 <= regional_lora_delta_adaptation_gain <= 1.0:
@@ -1524,6 +1542,7 @@ class ComfyBaselineRuntime:
                 width=width,
                 height=height,
                 steps=steps,
+                cfg=cfg,
                 sampler=sampler,
                 scheduler=scheduler,
                 seed=seed,
@@ -1532,6 +1551,7 @@ class ComfyBaselineRuntime:
                 regional_plan=regional_plan,
                 regional_lora_delta_adaptation=regional_lora_delta_adaptation,
                 regional_lora_delta_adaptation_gain=regional_lora_delta_adaptation_gain,
+                depth_control=depth_control,
                 projector_enabled=projector_enabled,
                 projector_preset=projector_preset,
                 projector_values=projector_values,
@@ -1569,6 +1589,7 @@ class ComfyBaselineRuntime:
             width=width,
             height=height,
             steps=steps,
+            cfg=cfg,
             sampler=sampler,
             scheduler=scheduler,
             seed=seed,
@@ -1577,6 +1598,7 @@ class ComfyBaselineRuntime:
             regional_plan=regional_plan,
             regional_lora_delta_adaptation=regional_lora_delta_adaptation,
             regional_lora_delta_adaptation_gain=regional_lora_delta_adaptation_gain,
+            depth_control=depth_control,
             projector_enabled=projector_enabled,
             projector_preset=projector_preset,
             projector_values=projector_values,
@@ -1600,6 +1622,7 @@ class ComfyBaselineRuntime:
         width: int,
         height: int,
         steps: int,
+        cfg: float,
         sampler: str,
         scheduler: str,
         seed: int,
@@ -1608,6 +1631,7 @@ class ComfyBaselineRuntime:
         regional_plan: RegionalPromptPlan | None,
         regional_lora_delta_adaptation: bool,
         regional_lora_delta_adaptation_gain: float,
+        depth_control: DepthControlPreparation | None,
         projector_enabled: bool,
         projector_preset: str,
         projector_values: tuple[float, ...],
@@ -1698,6 +1722,33 @@ class ComfyBaselineRuntime:
             bound_plan=bound_regional_plan,
             event=event,
         )
+        depth_latent = None
+        depth_summary: dict[str, Any] = {"version": 1, "enabled": False}
+        if depth_control is not None:
+            depth_control.schedule.reset()
+            self._ensure_memory("before Krea depth adapter loading", event)
+            generation_model, _depth_compatibility = install_depth_adapter(
+                generation_model,
+                depth_control.checkpoint_path,
+            )
+            depth_latent = encode_depth_control(
+                self.vae,
+                generation_model,
+                depth_control.resized_values,
+            )
+            generation_model = attach_depth_control(
+                generation_model,
+                depth_latent,
+                token_strength=depth_control.schedule,
+            )
+            if event is not None:
+                event(
+                    "Krea depth control prepared",
+                    {
+                        **depth_control.document(),
+                        "vae_encode_seconds": depth_latent.encode_seconds,
+                    },
+                )
 
         def callback(step: int, denoised, current, total: int) -> None:
             del denoised, current
@@ -1710,6 +1761,8 @@ class ComfyBaselineRuntime:
                         )
                     )
                     lora_statistics.reset_step_measurements()
+            if depth_control is not None:
+                depth_control.schedule.advance_after(step, total)
             snapshot = self.memory_snapshot(f"denoising step {step + 1}/{total}")
             if progress is not None:
                 progress(
@@ -1753,12 +1806,13 @@ class ComfyBaselineRuntime:
                     "another optimized-attention override is already installed"
                 )
             transformer_options["optimized_attention_override"] = attention_override
+        sample_completed = False
         try:
             samples = comfy.sample.sample(
                 generation_model,
                 noise,
                 steps,
-                1.0,
+                cfg,
                 sampler,
                 scheduler,
                 positive,
@@ -1769,6 +1823,7 @@ class ComfyBaselineRuntime:
                 disable_pbar=True,
                 seed=seed,
             )
+            sample_completed = True
         finally:
             if attention_override is not None:
                 attention_override.clear()
@@ -1776,6 +1831,8 @@ class ComfyBaselineRuntime:
                     transformer_options.pop("optimized_attention_override", None)
                 else:
                     transformer_options["optimized_attention_override"] = previous_override
+            if depth_control is not None and not sample_completed:
+                clear_depth_control(generation_model)
         if attention_override is not None:
             if attention_override.matched_calls == 0:
                 raise RuntimeError(
@@ -1799,6 +1856,23 @@ class ComfyBaselineRuntime:
                         "LoRA delta-adaptive spatial guidance finalized",
                         attention_override.summary(),
                     )
+        if depth_control is not None and depth_latent is not None:
+            runtime_report = depth_adapter_runtime_report(generation_model)
+            if runtime_report.denoiser_calls == 0:
+                clear_depth_control(generation_model)
+                raise RuntimeError("Krea denoising did not reach the depth adapter")
+            depth_summary = {
+                "version": 1,
+                "enabled": True,
+                **depth_control.document(),
+                "control_latent_sha256": depth_latent.source_sha256,
+                "control_latent_shape": list(depth_latent.value.shape),
+                "vae_encode_seconds": depth_latent.encode_seconds,
+                "runtime": runtime_report.document(),
+            }
+            if event is not None:
+                event("Krea depth control completed", depth_summary)
+            clear_depth_control(generation_model)
         for report in lora_reports:
             if report.get("status") not in {"applied_global", "applied_regional"}:
                 continue
@@ -1856,6 +1930,7 @@ class ComfyBaselineRuntime:
         metadata.add_text("global_prompt", prompt)
         metadata.add_text("seed", str(seed))
         metadata.add_text("steps", str(steps))
+        metadata.add_text("cfg", str(cfg))
         metadata.add_text("sampler", sampler)
         metadata.add_text("scheduler", scheduler)
         metadata.add_text("size", f"{output_image.width}x{output_image.height}")
@@ -1873,6 +1948,7 @@ class ComfyBaselineRuntime:
         metadata.add_text("projector", json.dumps(projector_summary))
         metadata.add_text("post_upscale", json.dumps(upscale_summary))
         metadata.add_text("loras", json.dumps(lora_reports))
+        metadata.add_text("depth_control", json.dumps(depth_summary))
         metadata.add_text("memory_policy", self.memory_policy_key)
         metadata.add_text("oom_recovered", str(oom_recovered).lower())
         metadata.add_text("cpu_vae", str(self.cpu_vae).lower())
@@ -1890,9 +1966,10 @@ class ComfyBaselineRuntime:
             "projector": projector_summary,
             "post_upscale": upscale_summary,
             "loras": lora_reports,
+            "depth_control": depth_summary,
             "sampler": sampler,
             "scheduler": scheduler,
-            "cfg": 1.0,
+            "cfg": cfg,
             "memory_policy": self.memory_policy_key,
             "reserve_vram_gb": self.reserve_vram_gb,
             "cpu_vae": self.cpu_vae,

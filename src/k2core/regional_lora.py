@@ -41,6 +41,13 @@ class LoraDeltaRoute:
             return self.image_token_mask
         if not text_fusion and sequence_length == text_count + image_count:
             return self.text_token_mask + self.image_token_mask
+        # CFG values other than one also evaluate the unconditional prompt.
+        # Its text sequence is shorter than the compiled positive regional
+        # prompt and must not receive any regional adapter delta.
+        if text_fusion and 0 < sequence_length < text_count:
+            return (0.0,) * sequence_length
+        if not text_fusion and image_count < sequence_length < text_count + image_count:
+            return (0.0,) * sequence_length
         raise ValueError(
             f"LoRA route {self.display_name!r} expected "
             f"{text_count} text, {image_count} image, or "
@@ -50,6 +57,8 @@ class LoraDeltaRoute:
 
     def layerwise_text_batch_mask(self, batch_size: int) -> tuple[float, ...]:
         text_count = len(self.text_token_mask)
+        if 0 < batch_size < text_count:
+            return (0.0,) * batch_size
         if batch_size <= 0 or batch_size % text_count:
             raise ValueError(
                 f"LoRA route {self.display_name!r} expected a folded text batch "

@@ -63,6 +63,33 @@ class RegionalLoraRoutingTests(unittest.TestCase):
             route.text_token_mask * 2,
         )
 
+    def test_regional_route_zeros_shorter_unconditional_text_branch(self) -> None:
+        plan, bound = self._plans()
+        route = compile_lora_delta_routes(
+            [
+                {
+                    "id": "face",
+                    "name": "Face",
+                    "strength": 0.8,
+                    "global": False,
+                    "region_ids": ["right"],
+                }
+            ],
+            width=32,
+            height=16,
+            text_token_count=bound.text_token_count,
+            regional_plan=plan,
+            bound_plan=bound,
+        )[0]
+        short_text_count = max(1, bound.text_token_count - 1)
+        self.assertEqual(
+            route.sequence_mask(short_text_count, text_fusion=True),
+            (0.0,) * short_text_count,
+        )
+        self.assertEqual(route.layerwise_text_batch_mask(1), (0.0,))
+        combined = len(route.image_token_mask) + short_text_count
+        self.assertEqual(route.sequence_mask(combined, text_fusion=False), (0.0,) * combined)
+
     def test_standard_regional_route_excludes_broadcast_adapter_targets(self) -> None:
         plan, bound = self._plans()
         route = compile_lora_delta_routes(

@@ -1078,10 +1078,16 @@ class ComfyBaselineRuntime:
                             if text_fusion
                             else {image_count, text_count + image_count}
                         )
+                        def is_unconditional_length(length: int) -> bool:
+                            if text_fusion:
+                                return 0 < length < text_count
+                            return image_count < length < text_count + image_count
+
                         token_axes = [
                             axis
-                            for axis, length in enumerate(x.shape[:-1])
+                            for axis, length in enumerate(x.shape[1:-1], start=1)
                             if int(length) in expected_counts
+                            or is_unconditional_length(int(length))
                         ]
                         if len(token_axes) != 1:
                             raise ValueError(
